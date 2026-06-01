@@ -7,7 +7,7 @@ description: RDS 巡检最佳实践的 SOP Skill。加载后 Agent 按 5 步 SOP
 
 > **类型**：SOP Skill（与 [人读版实践文档](https://sls.aliyun.com/doc/starops/practices/rds-inspection-via-script/article.html) 一一对应、二者俱在）。教 Agent 怎么协助用户走完 5 步 SOP，最终落地一个活跃的 RDS 周期性巡检闭环。
 >
-> **不是** RDS 巡检本身的业务 Skill。业务 Skill 是 `rds-inspection`（同仓兄弟 skill），安装命令：`npx skills add aliyun-sls/sls-doc --skill rds-inspection`，或下载 [rds-inspection.tar.gz](https://starops-demo.oss-cn-beijing.aliyuncs.com/starops/demo/starops-best-practice/rds-inspection-via-script/docs/rds-inspection.tar.gz)。
+> **不是** RDS 巡检本身的业务 Skill。业务 Skill 是 `rds-inspection`（同仓兄弟 skill），安装命令：`npx skills add aliyun-sls/sls-doc-skills --skill rds-inspection`，或下载 [rds-inspection.tar.gz](https://starops-demo.oss-cn-beijing.aliyuncs.com/starops/demo/starops-best-practice/rds-inspection-via-script/docs/rds-inspection.tar.gz)。
 
 ## 能力边界
 
@@ -52,7 +52,7 @@ Agent **不能做**：
 
 ```bash
 # 方式 1：npx 安装到 <用户工作目录>/.claude/skills/rds-inspection/ 等
-npx skills add aliyun-sls/sls-doc --skill rds-inspection
+npx skills add aliyun-sls/sls-doc-skills --skill rds-inspection
 
 # 方式 2：直接下载 tar.gz 并展开
 curl -L -o /tmp/rds-inspection.tar.gz https://starops-demo.oss-cn-beijing.aliyuncs.com/starops/demo/starops-best-practice/rds-inspection-via-script/docs/rds-inspection.tar.gz
