@@ -1,17 +1,17 @@
 ---
 name: umodel-metric-entity-sop
-description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agent 将按 5 个样例引导用户避开 @ 实体提问的常见陷阱，覆盖单位、聚合口径、实体维度、拓扑链与缺失字段 5 类问题
+description: UModel 指标语义与实体拓扑 SOP Skill，加载后 Agent 将按 5 个样例引导用户识别 @ 实体提问中容易遗漏的要素，覆盖单位、聚合口径、实体维度、拓扑链与缺失字段 5 类场景
 ---
 
 # UModel 指标语义与实体拓扑 — SOP Skill
 
 > 本仓 **SOP Skill** 入口：把 [人读版实践文档](https://sls.aliyun.com/doc/starops/practices/umodel-metric-entity/article.html) 的 5 样例教学固化为 Agent 可加载形态。
 >
-> 区分：本实践无 meta skill 样品（产物是提问范式的纠偏经验，不是可执行业务 Skill）。
+> 区分：本实践无 meta skill 样品（产物是提问范式的对照样例，不是可执行业务 Skill）。
 
 ## SOP 概览
 
-5 个样例覆盖 5 类常见提问陷阱，章节顺序与 [人读版实践文档 样例 1～样例 5](https://sls.aliyun.com/doc/starops/practices/umodel-metric-entity/article.html) 一一对应：
+5 个样例覆盖 5 类常见提问场景，章节顺序与 [人读版实践文档 样例 1～样例 5](https://sls.aliyun.com/doc/starops/practices/umodel-metric-entity/article.html) 一一对应：
 
 1. 指标单位确认 — 单位 / data_format 必须显式取
 2. 聚合口径选择 — UModel 提供的是否就是用户想要的口径
@@ -19,7 +19,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 4. 拓扑关系分析 — 沿 Relation 链精确到具体应用与跳数
 5. UModel 缺失字段补全 — 阈值 / 采集源 / 多核归一化等业务语义需显式声明
 
-每个样例都用「正例提问 → 期望返回 → 关键字段确认 + 反例对照」三段结构。Agent 加载本 Skill 后，遇到用户用反例方式提问时，应主动纠偏到正例。
+每个样例都用「正例提问 → 期望返回 → 关键字段确认 + 反例对照」三段结构。Agent 加载本 Skill 后，遇到用户用反例方式提问时，应主动对照调整到正例。
 
 ## 步骤 1：指标单位确认
 
@@ -39,7 +39,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 **反例对照**：
 
 - 反例：`查 CPU 高不高` — 不确认单位，0.143 可能被误读为 14.3% 或 0.143%
-- Agent 纠偏：先取 `unit` 和 `data_format`，再判断高低
+- Agent 引导：先取 `unit` 和 `data_format`，再判断高低
 
 **输出要求**：
 
@@ -64,7 +64,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 **反例对照**：
 
 - 反例：`@<app-name> 查响应延迟的 P99` — UModel 没有该指标，模型可能把"对 avg 序列做 P99"误称为"请求级 P99"
-- Agent 纠偏：主动告知"UModel APM 服务层无 P99"，并给出 avg 序列 + 统计量的替代提问方式；若用户确实需要请求级 P99，引导到 trace duration 分布或 SLS span 分位聚合
+- Agent 引导：主动告知"UModel APM 服务层无 P99"，并给出 avg 序列 + 统计量的替代提问方式；若用户确实需要请求级 P99，引导到 trace duration 分布或 SLS span 分位聚合
 
 **输出要求**：
 
@@ -88,7 +88,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 **反例对照**：
 
 - 反例：`查 RDS 集群的 CPU` — 跨实例 avg，单实例 CPU 飙高被其他健康实例平均掉
-- Agent 纠偏：先锁定具体 EntitySet（如 `acs.rds.instance`），按 instanceId 维度独立返回时间序列，再让用户决定是否再聚合
+- Agent 引导：先锁定具体 EntitySet（如 `acs.rds.instance`），按 instanceId 维度独立返回时间序列，再让用户决定是否再聚合
 
 **输出要求**：
 
@@ -114,7 +114,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 **反例对照**：
 
 - 反例：`RDS 挂了影响什么` — 不锁拓扑，模型可能猜"影响所有应用"或漏掉间接依赖
-- Agent 纠偏：先确认该 RDS 在 APM 层是否有对应 `apm.external.database` 实体；有则展开三层链给出 N 个受影响应用；无则告知用户拓扑展开不到，建议换实例或补齐 APM 探针
+- Agent 引导：先确认该 RDS 在 APM 层是否有对应 `apm.external.database` 实体；有则展开三层链给出 N 个受影响应用；无则告知用户拓扑展开不到，建议换实例或补齐 APM 探针
 
 **输出要求**：
 
@@ -140,7 +140,7 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 **反例对照**：
 
 - 反例：`这个 CPU 算高吗` — 模型用未声明的内部默认阈值，无法追溯依据
-- Agent 纠偏：返回指标值时同时给出"阈值来源 = <来源类型>: <具体阈值>"，让告警判断可追溯、可复核
+- Agent 引导：返回指标值时同时给出"阈值来源 = <来源类型>: <具体阈值>"，让告警判断可追溯、可复核
 
 **输出要求**：
 
@@ -153,14 +153,14 @@ description: UModel 指标语义与实体拓扑教学 SOP Skill，加载后 Agen
 
 SOP 跑完后客户能拿到：
 
-- **正例提问模板**：5 类陷阱对应的可直接套用的提问句式
+- **正例提问模板**：5 类场景对应的可直接套用的提问句式
 - **反例 → 正例对照**：哪些写法会误导 Agent、应该怎么改
 - **关键字段清单**：每类提问应该取哪些字段（unit / data_format / EntitySet / Relation / 阈值来源）
 - **拓扑展开规范**：跨域映射 + 跳数标注 + N=0 的兜底说明
 
 ## 失败与回滚
 
-教学型 Skill，无变更操作，无回滚需求。各样例失败处置：
+SOP Skill，无变更操作，无回滚需求。各样例失败处置：
 
 | 样例 | 可能失败 | 处置 |
 |---|---|---|
