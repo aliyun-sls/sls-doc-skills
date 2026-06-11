@@ -4,14 +4,15 @@
 
 | 域 | 工具 | 命令 |
 |---|---|---|
-| acs / k8s | `starops sls promql query` | PromQL 查询，支持 deriv / predict_linear / avg_over_time / offset |
+| acs / k8s | `starops sls promql query` | PromQL 查询，支持 deriv / predict_linear / avg_over_time / offset / holt_winters |
 | apm | `starops observe metric_set query` | APM 预聚合指标摘要查询 |
+| log | `starops sls query` | SLS SQL 查询，支持 ts_predicate_arma / ts_decompose |
 
 ## 批量执行原则
 
 1. **巡检前必须先列 todo list**：明确要执行的域与巡检项
 2. **优先使用 `scripts/` 下脚本批量执行**：不手动逐条查询
-3. **三个脚本可并行执行**：acs / k8s / apm 脚本相互独立
+3. **四个脚本可并行执行**：acs / k8s / apm / log 脚本相互独立
 4. **使用 `references/report-template.md` 生成报告**：将 JSON 输出渲染为可读报告
 
 ## 快速失败规则
@@ -19,7 +20,8 @@
 - 单个巡检项查询失败返回 `status=error`，不阻断其他巡检项
 - PromQL 查询返回空结果标记为 `no_problem_found`，不重试
 - APM 域指标数据缺失标记为 `no_problem_found`，降级为空趋势
-- CLI 超时（60s）自动标记为 error
+- Log 域 SLS SQL 执行失败标记为 `error`，记录错误信息
+- CLI 超时（PromQL 60s / SLS 120s）自动标记为 error
 
 ## 参数说明
 
@@ -46,16 +48,28 @@
 | `--cases` | 否 | 指定巡检项 case_id 列表 |
 | `--list-cases` | 否 | 列出所有巡检项并退出 |
 
+### log 域
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `--region` | 是 | 阿里云 region |
+| `--logstore-project` | 是 | SLS Project 名称 |
+| `--logstore` | 是 | LogStore 名称 |
+| `--log-filter` | 否 | 日志过滤条件 |
+| `--time-range` | 是 | 时间范围 |
+| `--cases` | 否 | 指定巡检项 case_id 列表 |
+| `--list-cases` | 否 | 列出所有巡检项并退出 |
+
 ## JSON 输出结构
 
 ```json
 {
-  "total_cases": 12,
+  "total_cases": 15,
   "critical_cases": 1,
   "warning_cases": 3,
-  "normal_cases": 7,
-  "errors": 1,
-  "no_problem_found": 0,
+  "normal_cases": 10,
+  "errors": 0,
+  "no_problem_found": 1,
   "has_critical": true,
   "has_warning": true,
   "results": [
@@ -75,12 +89,6 @@
       "deriv_value": 2.3,
       "predicted_value": 92.1,
       "days_to_warning": 3.5,
-      "baseline_value": null,
-      "deviation_ratio": null,
-      "deviation_direction": null,
-      "predicted_7d_value": null,
-      "avg_7d_value": null,
-      "exceed_percent": null,
       "raw_query": "...",
       "error": ""
     }
@@ -91,9 +99,10 @@
 ## 并行执行示例
 
 ```bash
-# 三个脚本并行执行
+# 四个脚本并行执行
 python3 infra-capacity-prediction.py --region cn-hangzhou --project my-project --metricstore my-ms --time-range last_6h &
 python3 k8s-capacity-prediction.py --region cn-hangzhou --project my-project --metricstore my-ms --time-range last_6h &
 python3 apm-risk-prediction.py --workspace my-ws --entity-domain apm --entity-type apm.service --entity-id svc-xxx --time-range last_6h &
+python3 log-capacity-prediction.py --region cn-hangzhou --logstore-project my-log-project --logstore my-logstore --log-filter "namespace: default" --time-range last_6h &
 wait
 ```

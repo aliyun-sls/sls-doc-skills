@@ -3,13 +3,12 @@
 apm-risk-prediction.py - APM 业务服务风险预测（3 项）
 
 业务脚本：只声明 PredictionCase 配置，零计算逻辑。
-所有计算由 capacity_prediction_common.py 公共引擎承载。
+所有计算由 capacity_prediction_common.py + capacity_prediction_engine.py 承载。
 
 APM 域特殊实现：
-- 不使用 PromQL deriv/predict_linear（APM 预聚合指标不支持）
 - 使用 starops observe metric_set query 获取指标摘要数据
 - 从 __summary__.cur_statistics 提取 mean_value / max_value
-- 错误率直接使用预计算的 error_rate 指标（不用 error_count/request_count 手动计算）
+- 脚本内用线性回归计算趋势
 
 覆盖：服务错误率 / 服务延迟 / 服务 QPS 突增
 """
@@ -20,8 +19,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from capacity_prediction_common import (
-    PredictionCase, Severity, Strategy, cli_main
+    PredictionCase, Severity, Strategy,
 )
+from capacity_prediction_engine import cli_main
 
 
 def build_cases(time_range: str = "") -> list:
@@ -38,7 +38,7 @@ def build_cases(time_range: str = "") -> list:
             strategy=Strategy.THRESHOLD_BREACH,
             warning_threshold=5.0,
             critical_threshold=10.0,
-            description="服务错误率超过 Warning(5%) 或 Critical(10%) 阈值，使用预计算 error_rate 指标",
+            description="服务错误率超过 Warning(5%) 或 Critical(10%) 阈值",
             metric_set_domain="apm",
             metric_set_name="apm.metric.apm.service",
             metric_names="error_rate",
@@ -84,4 +84,5 @@ if __name__ == "__main__":
     cli_main(
         cases=cases,
         description="APM 业务服务风险预测（3 项）：服务错误率、服务延迟、服务 QPS 突增",
+        domain="apm",
     )

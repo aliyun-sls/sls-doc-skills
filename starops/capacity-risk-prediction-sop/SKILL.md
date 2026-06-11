@@ -1,161 +1,122 @@
 ---
 name: capacity-risk-prediction-sop
-description: 容量风险预测与服务饱和度评估 SOP Skill，引导 Agent 按"选对象→查趋势→算预测→比基线→给结论"5 步完成跨域容量风险评估，覆盖 ECS/RDS/Redis/K8s/APM 三个域 4 种评估策略
+description: 饱和度评估与风险预测 SOP Skill，引导 Agent 按 Phase 1 算子认知、Phase 2 Meta Skill 构建、Phase 3 长期任务运营三步复现容量风险预测实践。三阶段已由真实 STAROps thread 跑通；meta-skill-sample 中的 capacity-risk-prediction Meta Skill 已验证。
 ---
 
-# 容量风险预测与服务饱和度评估 — SOP Skill
+# 饱和度评估与风险预测 — SOP Skill
 
-> 本仓 **SOP Skill** 入口：把 [人读版实践文档](https://sls.aliyun.com/doc/starops/practices/capacity-risk-prediction/article.html) 的 5 步流程固化为 Agent 可加载形态。
+> 本仓 **SOP Skill** 入口：指导 Agent 复现 [人读版实践文档]({ARTICLE_URL}) 的三阶段流程。
 >
-> 区分：本实践的 meta skill（定时容量预测巡检）在 `meta-skill-sample/`，是客户直接消费的业务 Skill。本 SOP Skill 是教流程用的。
+> 重要边界：`meta-skill-sample/` 是已验证的业务 Meta Skill，负责真正执行 4 域 15 项容量巡检；本 SOP Skill 固化的三阶段流程已由三个 STAROps thread 跑通。后续发布到 skill 分发仓时，只需验证分发形态和加载入口。
 
-## SOP 概览
+## 产物关系
 
-5 个步骤覆盖容量风险预测的完整流程：
+| 产物 | 作用 | 状态 |
+|---|---|---|
+| 文章 | 客户向解释三阶段和 SLS 算子 | 已补强 |
+| SOP Skill | 教 Agent 复现三阶段 | 三阶段已跑通，待发布形态验证 |
+| Meta Skill | 执行 4 域 15 项容量巡检 | 已验证 |
 
-1. 选择评估对象与指标 — 按域选实体 + 确认指标语义
-2. 查看当前状态与趋势 — 当前值 + deriv 变化率 + 趋势图
-3. 容量预测 — predict_linear 预测 + 剩余天数计算
-4. 基线偏离检测 — 日环比 + 7 天基线对比
-5. 结论与建议 — 汇总报告 + 风险等级 + 建议行动
+## 步骤 1：Phase 1 算子认知
 
-## 步骤 1：选择评估对象与指标
+目标：先确认当前 STAROps workspace 支持哪些时序算子，明确 MetricStore / Logstore / APM 的数据路径边界。
 
-**Agent 指令**：
+Agent 应向 STAROps 确认：
 
-1. 确认用户要评估哪个域：acs（ECS/RDS/Redis）/ k8s（Node/Pod）/ apm（业务服务）
-2. @ 具体实体，获取 entity_id
-3. 确认指标的 `data_format` 和 `type`（引用 umodel-metric-entity 规范）
-4. 确认阈值来源（行业建议 / 历史基线 / 业务规则）
+| 路径 | 要确认的能力 | 结论口径 |
+|---|---|---|
+| MetricStore / PromQL | `deriv`、`predict_linear`、`holt_winters`、`offset`、`avg_over_time` | acs/k8s 指标走 PromQL |
+| Logstore / SLS SQL | `ts_predicate_arma`、`ts_decompose`、`ts_anomaly_filter` | log 域走 SLS SQL |
+| APM / metric_set | `starops observe metric_set query` | APM 预聚合指标不走 PromQL |
 
-**用户提问示例**：
+必须显式说明：SLS SQL 的 `ts_*` 函数只能用于 Logstore 日志衍生时序，不能直接用于 MetricStore 云监控指标。
 
-```
-@i-j6c6y2n68f610xaa9a29 对这台 ECS 做容量风险评估，关注 CPU 使用率，Warning 阈值 85%
-```
+当前已验证不可用项：`ts_linearregress`、`ts_smooth`、`ts_cp`、`ts_outlier`、`ts_period_extract`、`ts_density`、`ts_correlate` 在 cn-hongkong 实例未注册。
 
-**输出要求**：
+交付物：算子可用性表、数据路径选择表、不可用函数清单。
 
-- 确认实体（EntitySet + entity_id + instanceId）
-- 确认指标（名称 + data_format + type + unit）
-- 确认阈值（Warning / Critical + 来源）
+## 步骤 2：Phase 2 构建并验证 Meta Skill
 
-## 步骤 2：查看当前状态与趋势
+目标：使用 `replay-prompt.md` 构建 `capacity-risk-prediction` Meta Skill，并完成结构验证和真实执行验证。
 
-**Agent 指令**：
+构建要求：
 
-1. 查询当前值（最近 1h 的 mean / max / min）
-2. 计算变化率：`deriv(metric[6h])` × 3600 = 每小时增量
-3. 判断趋势方向：正值 = 上升，负值 = 下降，接近零 = 平稳
-4. acs / k8s 域用 PromQL，apm 域用 `starops observe entity metric-data` + 脚本计算
+- 4 域：acs、k8s、apm、log。
+- 15 项：acs 6 + k8s 3 + apm 3 + log 3。
+- 7 策略：趋势预测、基线偏离、缓慢增长、阈值突破、短期波动、ARIMA 预测、趋势分解与异常检测。
+- 架构：数据驱动声明 + 公共引擎。
+- 环境参数全部由 CLI 传入，不写死 region / project / metricstore / logstore / entity-id。
 
-**PromQL 模板**：
+验证要求：
 
-```promql
-# 当前值
-avg_over_time({metric}{instanceId="{id}"}[1h])
-
-# 变化率（每秒增量）
-deriv({metric}{instanceId="{id}"}[6h])
-```
-
-**输出要求**：
-
-- 当前值（带单位）
-- 变化率（每小时 / 每天）
-- 趋势方向（上升 / 下降 / 平稳）
-
-## 步骤 3：容量预测
-
-**Agent 指令**：
-
-1. 用 `predict_linear(metric[6h], N)` 预测 N 秒后的值
-2. 预测 1 天后（86400s）和 7 天后（604800s）
-3. 计算"剩余天数"：`(threshold - current) / (deriv * 3600 * 24)`
-4. 如果 deriv <= 0（平稳或下降），剩余天数 = 无穷（不会触及阈值）
-5. APM 域不支持 predict_linear，用脚本内线性回归替代
-
-**PromQL 模板**：
-
-```promql
-# 预测 7 天后的值
-predict_linear({metric}{instanceId="{id}"}[6h], 604800)
+```bash
+find . -type f | sort
+python3 -m py_compile scripts/*.py
+python3 scripts/infra-capacity-prediction.py --list-cases
+python3 scripts/k8s-capacity-prediction.py --list-cases
+python3 scripts/apm-risk-prediction.py --list-cases
+python3 scripts/log-capacity-prediction.py --list-cases
 ```
 
-**输出要求**：
+验收：`--list-cases` 总数为 15，脚本可执行，真实数据执行能输出结构化风险报告，并能打包为 `capacity-risk-prediction.tar.gz`。
 
-- 1 天后预测值
-- 7 天后预测值
-- 预计触及 Warning 的剩余天数（或"不会触及"）
-- 预计触及 Critical 的剩余天数
+SLS 适配要求：
 
-## 步骤 4：基线偏离检测
+| 适配点 | 要求 |
+|---|---|
+| `ts_predicate_arma` 参数 | `p` / `q` 默认值不得小于 2 |
+| 错误日志过滤 | 不依赖未建索引字段的冒号搜索；优先从 `content` 字段提取 HTTP status 或用 SQL 条件过滤 |
+| `ts_decompose` 返回 | 按 SLS `logs` 数组解析 `unixtime` / `src` / `trend` / `season` / `residual` |
 
-**Agent 指令**：
+交付物：Meta Skill 目录、验证命令输出、真实执行报告、tar.gz。
 
-1. 日环比：`metric / metric offset 1d` — 看今天与昨天同时段的比值
-2. 7 天基线：`avg_over_time(metric[7d])` — 过去 7 天的均值作为基线
-3. 偏离幅度：`(当前值 - 基线) / 基线 × 100%`
-4. 偏离超过 50% 标注异常（K8s Node 示例：日环比 +51pp 就是典型的基线偏离告警）
+## 步骤 3：Phase 3 长期任务运营
 
-**PromQL 模板**：
+目标：把已验证 Meta Skill 配置为 STAROps 长期任务，并验证通知闭环。
 
-```promql
-# 日环比
-{metric}{instanceId="{id}"} / {metric}{instanceId="{id}"} offset 1d
+执行参数需覆盖：
 
-# 7 天基线
-avg_over_time({metric}{instanceId="{id}"}[7d])
-```
+- acs 域：region / project / metricstore / time-range。
+- k8s 域：region / project / metricstore / time-range。
+- apm 域：workspace / entity-domain / entity-type / entity-id / time-range。
+- log 域：logstore-project / logstore / log-filter / region / time-range。
 
-**输出要求**：
+长期任务建议配置：
 
-- 日环比（倍数或百分点差异）
-- 基线偏离（当前值 vs 7 天均值的差异）
-- 是否异常（偏离 > 50%）
+| 项 | 建议值 |
+|---|---|
+| 任务名 | 容量风险预测巡检计划 |
+| 执行计划 | 每个工作日 09:50（cron: `50 9 * * 1-5`） |
+| 通知规则 | Warning / Critical 时邮件通知；全部 Normal 仅保存报告 |
 
-## 步骤 5：结论与建议
+已验证结果：任务 `mission-q98nn71adi6y604x6b` 创建成功；巡检结果为 Critical 0、Warning 3、Normal 11、Error 0、NoData 1；通知测试已发送。
 
-**Agent 指令**：
-
-1. 汇总上述 4 步的结果到一张表
-2. 按风险等级分类：
-   - **Critical**：当前值已超 Critical 阈值，或剩余天数 < 1 天
-   - **Warning**：当前值超 Warning 阈值，或剩余天数 < 7 天，或基线偏离 > 50%
-   - **Normal**：其余
-3. 给出建议行动（扩容 / 优化 / 清理 / 观察）
-4. 如果是定时巡检，对比上次报告的变化
-
-**输出要求（汇总表）**：
-
-```
-| 指标 | 当前值 | 变化率 | 7天预测 | 日环比 | 基线偏离 | 阈值 | 剩余天数 | 风险 | 建议 |
-```
+交付物：长期任务 ID、子计划 ID、下次执行时间、通知配置、一次完整巡检报告。
 
 ## 失败与回滚
 
-SOP Skill，只读操作，无回滚需求。
+本 SOP 指导的是只读查询、Skill 生成和长期任务配置。业务资源不被修改。
 
-| 步骤 | 可能失败 | 处置 |
+| 失败点 | 表现 | 处理 |
 |---|---|---|
-| 步骤 1 | 实体不在 UModel 中 | 提示用户确认实体是否已接入 |
-| 步骤 2 | deriv 返回空（数据不足） | 告知"数据不足 6h，无法计算变化率"，用 1h 窗口降级 |
-| 步骤 3 | predict_linear 返回空（APM 域） | 切换到脚本内线性回归；如果也无数据，标注"无法预测" |
-| 步骤 4 | offset 1d 返回空（实体昨天不存在） | 标注"无历史数据可比"，跳过环比 |
-| 步骤 5 | 全部巡检项都是 Normal | 正常结论，不是失败 |
+| 算子不可用 | STAROps 返回函数未注册 | 从策略中移除，不写成可执行路径 |
+| MetricStore / Logstore 混用 | `ts_*` 无法作用于云监控指标 | 回到路径选择表，MetricStore 走 PromQL |
+| Meta Skill 结构不符 | 文件数、frontmatter、脚本编译失败 | 修 replay prompt 后重新生成 |
+| Log 域脚本报错 | 参数、过滤条件或返回格式不匹配 | 按 SLS 适配要求修复 |
+| 长期任务提交失败 | mission yaml 校验失败或 description 超长 | 缩短描述并重跑 VerifyMission |
 
 ## 召回 Routing
 
-**应路由到本 SOP**：
+应路由到本 SOP：
 
-- "做容量评估 / 容量预测"
-- "这个指标还能撑多久"
-- "预测一下磁盘什么时候满"
-- "CPU 趋势怎么样"
-- "和昨天比有变化吗"
-- "风险评估 / 饱和度评估"
+- “做容量评估 / 容量预测”
+- “这个指标还能撑多久”
+- “预测一下磁盘什么时候满”
+- “请求量有没有异常突增”
+- “业务负载有没有周期性规律”
+- “把容量预测做成长期任务”
 
-**不应路由到本 SOP**：
+不应路由到本 SOP：
 
 - 已触发告警的 RCA → `alert-rca-flow`
 - RDS 周期性巡检（看当前值而非预测）→ `rds-inspection-via-script`

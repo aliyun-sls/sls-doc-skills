@@ -3,9 +3,10 @@
 k8s-capacity-prediction.py - k8s 集群资源容量风险预测（3 项）
 
 业务脚本：只声明 PredictionCase 配置，零计算逻辑。
-所有计算由 capacity_prediction_common.py 公共引擎承载。
+所有计算由 capacity_prediction_common.py + capacity_prediction_engine.py 承载。
 
 覆盖：Node CPU / Node 内存 / Pod 内存
+策略：趋势预测 + 基线偏离、缓慢增长
 """
 
 import sys
@@ -14,8 +15,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from capacity_prediction_common import (
-    PredictionCase, Severity, Strategy, cli_main
+    PredictionCase, Severity, Strategy,
 )
+from capacity_prediction_engine import cli_main
 
 
 def build_cases(time_range: str = "") -> list:
@@ -80,4 +82,5 @@ if __name__ == "__main__":
     cli_main(
         cases=cases,
         description="k8s 集群资源容量风险预测（3 项）：Node CPU、Node 内存、Pod 内存",
+        domain="promql",
     )

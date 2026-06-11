@@ -15,7 +15,7 @@ APM 域与 acs/k8s 域的关键区别：
 1. **不使用 PromQL 函数**：APM 预聚合指标不支持 `deriv()` / `predict_linear()` 等 PromQL 函数
 2. **使用 `starops observe metric_set query`**：获取指标摘要数据（mean/max/min）
 3. **从 `__summary__.cur_statistics` 提取**：mean_value / max_value 用于趋势和阈值判断
-4. **错误率使用预计算指标**：直接使用 `error_rate` 指标，不用 error_count/request_count 手动计算
+4. **脚本内线性回归**：从时序数据计算趋势斜率
 
 ## 详细说明
 

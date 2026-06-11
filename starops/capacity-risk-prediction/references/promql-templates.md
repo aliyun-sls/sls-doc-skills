@@ -59,13 +59,6 @@ avg by ({group_by}) ({metric} offset 1d)
 avg by ({group_by}) (avg_over_time({metric}[7d]))
 ```
 
-### 参数说明
-
-| 参数 | 说明 | 示例 |
-|---|---|---|
-| `metric` | 指标名称 | `node_cpu_seconds_total` |
-| `group_by` | 分组标签 | `node` |
-
 ### 使用示例
 
 ```promql
@@ -102,13 +95,6 @@ avg by ({group_by}) (predict_linear({metric}[6h], 604800))
 avg by ({group_by}) (avg_over_time({metric}[7d]))
 ```
 
-### 参数说明
-
-| 参数 | 说明 | 示例 |
-|---|---|---|
-| `metric` | 指标名称 | `AliyunEcs_diskusage_utilization` |
-| `604800` | 7 天秒数 | 固定值 |
-
 ### 使用示例
 
 ```promql
@@ -136,27 +122,42 @@ avg by (instance_id) (avg_over_time(AliyunEcs_diskusage_utilization[7d]))
 avg by ({group_by}) ({metric})
 ```
 
-### 参数说明
-
-| 参数 | 说明 | 示例 |
-|---|---|---|
-| `metric` | 指标名称 | `error_rate` |
-| `warning_threshold` | Warning 阈值 | `5.0` |
-| `critical_threshold` | Critical 阈值 | `10.0` |
-
-### 使用示例
-
-```promql
-# 服务错误率（APM 预计算指标）
-error_rate
-
-# 服务延迟（毫秒）
-avg_request_latency_seconds * 1000
-```
-
 ### 注意事项
 
 - 当前值 > critical → Critical 风险
 - 当前值 > warning → Warning 风险
 - 超标幅度 = (当前值 - 阈值) / 阈值 * 100%
 - APM 域使用 `metric_set query` 获取预聚合指标，不使用 PromQL 函数
+
+---
+
+## 策略 5：短期波动（short_term_fluctuation / holt_winters）
+
+### 模板
+
+```promql
+# Holt-Winters 指数平滑预测
+avg by ({group_by}) (holt_winters({metric}[1h], 0.7, 0.5))
+```
+
+### 参数说明
+
+| 参数 | 说明 | 示例 |
+|---|---|---|
+| `metric` | 指标名称 | `AliyunEcs_CPUUtilization` |
+| `0.7` | 平滑因子 alpha | 范围 0-1 |
+| `0.5` | 趋势因子 beta | 范围 0-1 |
+
+### 使用示例
+
+```promql
+# ECS CPU Holt-Winters 预测
+avg by (instance_id) (holt_winters(AliyunEcs_CPUUtilization[1h], 0.7, 0.5))
+```
+
+### 注意事项
+
+- `holt_winters()` 使用双指数平滑预测下一个值
+- 适用于流量型指标（QPS、请求量等）的短期突增预警
+- 预测值/当前值 > 2.0 表示显著突增
+- 需要至少 2 个数据点的时间窗口

@@ -7,7 +7,6 @@
 ====================
 生成时间: {timestamp}
 Region: {region}
-Project: {project}
 时间范围: {time_range}
 ```
 
@@ -43,6 +42,12 @@ Error:    {errors}
 | case_id | 实体 | 当前值 | 策略 | 风险等级 | 偏离比 | 超标幅度 | 建议 |
 |---|---|---|---|---|---|---|---|
 | {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {deviation_ratio} | {exceed_percent} | {action} |
+
+### log 日志衍生时序
+
+| case_id | 实体 | 当前值 | 策略 | 风险等级 | 预测值 | 异常比例 | 建议 |
+|---|---|---|---|---|---|---|---|
+| {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {arima_predicted_value} | {anomaly_ratio} | {action} |
 
 ## 整体建议
 
