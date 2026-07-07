@@ -1,370 +1,415 @@
 ---
 name: capacity-risk-prediction
-description: 跨域容量风险预测与服务饱和度评估，覆盖 ECS/RDS/Redis/K8s/APM/Log 四个域 15 项巡检，执行趋势预测、基线偏离、缓慢增长、阈值突破、短期波动(holt_winters)、ARIMA 预测(ts_predicate_arma)、分解与异常检测(ts_decompose + ts_anomaly_filter) 7 种评估策略，输出结构化风险报告。
+description: >
+  通用容量风险预测执行引擎。接收 Mission Profile（预测对象列表、数据源坐标、阈值、候选维度、调度与通知规则），
+  通过 series_forecast / series_describe 对任意数据源（MetricStore / Prometheus / CloudMonitor / SLS LogStore）
+  构造等间隔时间序列并预测未来趋势，输出结构化风险报告。
+  当 Mission 需要执行容量风险预测、服务饱和度评估、趋势外推、阈值突破预测时触发。
+  不用于数据源发现（Phase 0 discovery）、UModel 建模、告警规则 CRUD、或单次指标查询。
 metadata:
-  version: 2.0.0
-  tags:
-    - capacity
-    - prediction
-    - risk
-    - saturation
-    - trend
-    - arima
-    - holt-winters
-    - decomposition
+  name_cn: 容量风险预测执行引擎
+  name_en: Capacity Risk Prediction Runtime
+  description_cn: >
+    通用容量风险预测执行引擎。接收 Mission Profile 注入的预测对象、数据源、阈值和维度，
+    执行 9 步预测流水线，输出风险报告。所有对象坐标均为参数注入，skill 内部不写死任何具体服务或资源。
+  description_en: >
+    Generic capacity risk prediction runtime engine. Accepts Mission Profile with forecast targets,
+    data source coordinates, thresholds, and dimensions. Executes 9-step prediction pipeline
+    using series_forecast / series_describe. No hardcoded objects.
 ---
 
-# 跨域容量风险预测与服务饱和度评估
+# 目标与完成标准
 
-## 能力上下文边界
+## 目标
 
-本 Skill 用于对跨域基础设施与业务服务进行**容量风险预测与饱和度评估**，覆盖以下四个域：
+作为 capacity-risk-prediction Mission 的运行时执行引擎，接收 Mission Profile 参数注入，对任意预测对象执行时间序列预测与风险评估，输出结构化风险报告。
 
-| 域 | 脚本 | 巡检项数 | 数据来源 |
-|---|---|---|---|
-| acs 基础资源 | `infra-capacity-prediction.py` | 6 | PromQL（`starops sls promql query`） |
-| k8s 集群资源 | `k8s-capacity-prediction.py` | 3 | PromQL（`starops sls promql query`） |
-| apm 业务服务 | `apm-risk-prediction.py` | 3 | APM 指标（`starops observe metric_set query`） |
-| log 日志衍生时序 | `log-capacity-prediction.py` | 3 | SLS SQL（`starops sls query` + 时序函数） |
+## 完成标准
 
-**总计：15 项巡检**
+- 所有 Profile 中的 forecast_targets 均完成 series_forecast + series_describe
+- 每个 target 产出：预测值序列、上下界、segments、transitions、数据质量
+- 阈值评估完成，每个 target 有 risk_level（Normal / Warning / Critical）
+- 共振检测完成（多信号同向恶化时标记 resonance）
+- 风险报告 JSON + 可读 Markdown 已生成
+- 通知规则已执行（Normal 静默，Warning/Critical 或共振事件通知）
 
-### 边界约束
+# 输入契约
 
-- **不执行任何变更操作**：仅读取指标与日志数据，不修改资源配置、不扩缩容、不重启实例
-- **不访问数据库或容器**：所有数据通过可观测性平台（SLS MetricStore / LogStore / APM MetricSet）获取
-- **不展示敏感信息**：输出中自动脱敏账号、IP、密码、Token 等字段
-- **跨 workspace / region 复用**：不依赖固定环境，所有环境参数通过 CLI 参数传入
+## Mission Profile（JSON）
 
----
-
-## 执行策略
-
-### 批量执行原则
-
-1. **巡检前必须先列 todo list**：明确要执行的域与巡检项
-2. **优先使用 `scripts/` 下脚本批量执行**：不手动逐条查询
-3. **四个脚本可并行执行**：acs / k8s / apm / log 脚本相互独立，可同时运行
-4. **使用 `references/report-template.md` 生成报告**：将 JSON 输出渲染为可读报告
-
-### 快速失败与跳过规则
-
-- 单个巡检项查询失败（超时、权限不足、JSON 解析失败）返回 `status=error`，**不阻断其他巡检项**
-- PromQL 查询返回空结果时，标记为 `no_problem_found`，不重试
-- APM 域指标数据缺失时，标记为 `no_problem_found`，降级为空趋势
-- Log 域 SLS SQL 执行失败时，标记为 `error` 并记录错误信息
-
-### 脚本参数说明
-
-#### acs / k8s 域
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `--region` | 是 | 阿里云 region |
-| `--project` | 是 | SLS project |
-| `--metricstore` | 是 | SLS metricstore |
-| `--time-range` | 是 | 时间范围，如 `last_6h` |
-| `--cases` | 否 | 指定巡检项 case_id 列表 |
-| `--list-cases` | 否 | 列出所有巡检项并退出 |
-
-#### apm 域
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `--workspace` | 是 | UModel workspace |
-| `--entity-domain` | 是 | 实体域，如 `apm` |
-| `--entity-type` | 是 | 实体类型，如 `apm.service` |
-| `--entity-id` | 是 | 实体 ID |
-| `--time-range` | 是 | 时间范围 |
-| `--cases` | 否 | 指定巡检项 case_id 列表 |
-| `--list-cases` | 否 | 列出所有巡检项并退出 |
-
-#### log 域
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `--region` | 是 | 阿里云 region |
-| `--logstore-project` | 是 | SLS Project 名称 |
-| `--logstore` | 是 | LogStore 名称 |
-| `--log-filter` | 否 | 日志过滤条件（如 `resources.k8s.namespace.name: cms-demo`） |
-| `--time-range` | 是 | 时间范围 |
-| `--cases` | 否 | 指定巡检项 case_id 列表 |
-| `--list-cases` | 否 | 列出所有巡检项并退出 |
-
-### 并行执行示例
-
-```bash
-# 四个脚本并行执行
-python3 infra-capacity-prediction.py --region cn-hangzhou --project my-project --metricstore my-ms --time-range last_6h &
-python3 k8s-capacity-prediction.py --region cn-hangzhou --project my-project --metricstore my-ms --time-range last_6h &
-python3 apm-risk-prediction.py --workspace my-ws --entity-domain apm --entity-type apm.service --entity-id svc-xxx --time-range last_6h &
-python3 log-capacity-prediction.py --region cn-hangzhou --logstore-project my-log-project --logstore my-logstore --log-filter "namespace: default" --time-range last_6h &
-wait
-```
-
----
-
-## 7 种评估策略详解
-
-### 策略 1：趋势预测（trend_prediction）
-
-**适用场景**：当前值在阈值 50%-90%，且变化率 > 0（持续增长）
-
-**核心 PromQL**：
-- 当前值：`metric`
-- 变化率：`deriv(metric[6h])`
-- 预测值：`predict_linear(metric[6h], N)`
-
-**判定逻辑**：
-1. 当前值 > warning_threshold * 0.5 且 < warning_threshold
-2. deriv > 0（持续增长）
-3. predict_linear 预测值 > warning_threshold → 触发风险
-4. 计算 `days_to_warning`：剩余天数
-
-### 策略 2：基线偏离（baseline_deviation）
-
-**适用场景**：检测异常突增/突降，日环比或周基线偏离显著
-
-**核心 PromQL**：
-- 当前值：`metric`
-- 昨日同期：`metric offset 1d`
-- 7 天均值：`avg_over_time(metric[7d])`
-
-**判定逻辑**：
-1. 计算偏离倍数：`current / offset_1d`
-2. 偏离倍数 > 2.0 或 < 0.5 → 触发风险
-
-### 策略 3：缓慢增长（slow_growth）
-
-**适用场景**：deriv > 0 但绝对值小，短期不会超阈值，长期有容量风险
-
-**核心 PromQL**：
-- 7 天预测：`predict_linear(metric[6h], 604800)`
-- 7 天均值：`avg_over_time(metric[7d])`
-
-**判定逻辑**：
-1. deriv > 0 但 predict_linear(6h) < warning_threshold
-2. predict_linear(7d) > warning_threshold → 触发缓慢增长风险
-
-### 策略 4：阈值突破（threshold_breach）
-
-**适用场景**：当前值已超过 Warning 或 Critical 阈值
-
-**判定逻辑**：
-1. current > critical → Critical 风险
-2. current > warning → Warning 风险
-3. 计算超标幅度百分比
-
-### 策略 5：短期波动（short_term_fluctuation）
-
-**适用场景**：流量型指标突增预警
-
-**核心 PromQL**：
-- `holt_winters(metric[1h], 0.7, 0.5)`
-
-**判定逻辑**：
-1. holt_winters 预测值 > warning_threshold → Warning
-2. holt_winters 预测值 > critical_threshold → Critical
-3. 预测值/当前值 > 2.0 → 突增预警
-
-### 策略 6：ARIMA 预测（arima_prediction）
-
-**适用场景**：请求量/错误数精确预测（Log 域）
-
-**核心 SLS SQL**：
-- `ts_predicate_arma(t, cnt, p, d, q, n, step)`
-
-**判定逻辑**：
-1. 预测值/当前值 > warning_threshold → Warning
-2. 预测值/当前值 > critical_threshold → Critical
-
-### 策略 7：分解与异常检测（decomposition_anomaly）
-
-**适用场景**：发现周期性或统计异常（Log 域）
-
-**核心 SLS SQL**：
-- `ts_decompose(t, cnt)` + 异常点统计
-
-**判定逻辑**：
-1. 异常比例 > 0.8 → Warning
-2. 异常比例 > 0.95 → Critical
-3. 残差标准差超 2 倍 → Critical
-
----
-
-## 巡检项目录
-
-### acs 基础资源（6 项）
-
-详见 `references/infra.md`
-
-| case_id | 指标 | 策略 | 阈值 (W/C) | 级别 |
-|---|---|---|---|---|
-| ecs_cpu_trend | AliyunEcs_CPUUtilization | 趋势预测 | 85% / 95% | P1 |
-| ecs_disk_trend | AliyunEcs_diskusage_utilization | 缓慢增长 | 80% / 90% | P1 |
-| ecs_memory_trend | AliyunEcs_memory_usedutilization | 趋势预测 | 85% / 95% | P2 |
-| rds_cpu_trend | AliyunRds_CpuUsage | 趋势预测 | 70% / 85% | P1 |
-| rds_conn_trend | AliyunRds_ConnectionUsage | 趋势预测 | 70% / 85% | P2 |
-| redis_memory_trend | AliyunKvstore_StandardMemoryUsage | 缓慢增长 | 75% / 90% | P1 |
-
-### k8s 集群资源（3 项）
-
-详见 `references/k8s.md`
-
-| case_id | 指标 | 策略 | 阈值 (W/C) | 级别 |
-|---|---|---|---|---|
-| node_cpu_trend | node_cpu_seconds_total | 趋势预测 + 基线偏离 | 70% / 85% | P1 |
-| node_memory_trend | node_memory_MemAvailable_bytes | 趋势预测 | 80% / 90% | P1 |
-| pod_memory_trend | container_memory_working_set_bytes | 缓慢增长 | 80% / 95% | P2 |
-
-### apm 业务服务（3 项）
-
-详见 `references/apm.md`
-
-| case_id | 指标 | 策略 | 阈值 (W/C) | 级别 |
-|---|---|---|---|---|
-| service_error_rate | error_rate | 阈值突破 | 5% / 10% | P1 |
-| service_latency | avg_request_latency_seconds | 阈值突破 + 趋势 | 200ms / 500ms | P1 |
-| service_qps_spike | request_count | 基线偏离 | 日环比 > 2x | P2 |
-
-### log 日志衍生时序（3 项）
-
-详见 `references/log.md`
-
-| case_id | 数据源 | 策略 | 阈值 (W/C) | 级别 |
-|---|---|---|---|---|
-| log_request_volume | LogStore 请求量时序 | ARIMA 预测 | 预测值超当前 2x / 3x | P1 |
-| log_error_rate | LogStore 错误数时序 | 分解与异常检测 | 异常概率 > 0.8 / 0.95 | P1 |
-| log_volume_trend | LogStore 日志量时序 | 分解与异常检测 | 残差超 2 倍标准差 | P2 |
-
----
-
-## 风险等级定义
-
-| 等级 | 含义 | 响应要求 |
-|---|---|---|
-| Critical | 已超过 Critical 阈值或预测 24h 内超限 | 立即处理 |
-| Warning | 超过 Warning 阈值或预测 7 天内超限 | 24 小时内处理 |
-| Normal | 当前值正常且趋势平稳 | 持续观察 |
-
----
-
-## 输出格式化规范
-
-### JSON 输出结构
+所有预测对象、数据源坐标、阈值、维度均通过 Mission Profile 注入。Skill 内部不写死任何具体服务、资源 ID 或存储坐标。
 
 ```json
 {
-  "total_cases": 15,
-  "critical_cases": 1,
-  "warning_cases": 3,
-  "normal_cases": 10,
-  "errors": 0,
-  "no_problem_found": 1,
-  "has_critical": true,
-  "has_warning": true,
-  "results": [
+  "profile_id": "string",
+  "profile_version": "1.0",
+  "workspace": "string",
+  "region": "string",
+  "time_range": "last_24h | last_7d | now-Nd~now",
+  "forecast_step": 30,
+  "forecast_targets": [
     {
-      "case_id": "ecs_cpu_trend",
-      "item": "ECS CPU 趋势预测",
-      "severity": "P1",
-      "strategy": "trend_prediction",
-      "status": "find_problem",
+      "target_id": "unique_id",
+      "object_ref": {
+        "name": "display_name",
+        "domain": "apm | k8s | acs | sls",
+        "type": "apm.service | k8s.pod | acs.rds.instance | ...",
+        "id": "entity_id_or_resource_id"
+      },
+      "data_source": {
+        "type": "metricstore_prom_call | prometheus_query | cloudmonitor_entity | sls_logstore",
+        "region": "cn-hangzhou",
+        "project": "sls_project",
+        "store": "metricstore_or_logstore_name",
+        "prometheus_instance_id": "for prometheus_query type",
+        "query_template": "PromQL or SPL template with {{variable}} placeholders",
+        "metric_name": "for cloudmonitor type",
+        "metric_set_domain": "for cloudmonitor type",
+        "metric_set_name": "for cloudmonitor type"
+      },
+      "signals": [
+        {
+          "signal_id": "request_count",
+          "query_template": "PromQL with {{service_name}} etc.",
+          "data_format": "KMB | percent | s | reqps | ...",
+          "direction": "higher_is_worse | lower_is_worse",
+          "thresholds": {
+            "warning": 100,
+            "critical": 200
+          }
+        }
+      ],
+      "candidate_dimensions": ["service", "namespace", "pod"],
+      "context": {
+        "service_name": "checkout",
+        "namespace": "cms-demo"
+      }
+    }
+  ],
+  "resonance": {
+    "enabled": true,
+    "group_by": ["chain", "namespace", "resource"],
+    "min_signals": 2
+  },
+  "notification": {
+    "normal": "silent",
+    "warning": "notify",
+    "critical": "notify",
+    "resonance": "notify"
+  }
+}
+```
+
+### 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|:----:|------|
+| `workspace` | Y | UModel workspace ID |
+| `region` | Y | 阿里云 region |
+| `time_range` | Y | 取数时间范围，需保证 >=200 数据点 |
+| `forecast_step` | N | 预测步数，默认 30 |
+| `forecast_targets[]` | Y | 预测对象列表 |
+| `forecast_targets[].target_id` | Y | 唯一标识 |
+| `forecast_targets[].object_ref` | Y | 对象引用（name/domain/type/id） |
+| `forecast_targets[].data_source` | Y | 数据源坐标与查询模板 |
+| `forecast_targets[].signals[]` | Y | 信号列表（每个信号一个 PromQL/SPL + 阈值） |
+| `forecast_targets[].context` | N | 查询模板变量替换上下文 |
+| `resonance` | N | 共振检测配置 |
+| `notification` | N | 通知规则 |
+
+### 数据源类型
+
+| type | 适用场景 | 取数路径 |
+|------|----------|----------|
+| `metricstore_prom_call` | APM MetricStore 原始指标 | `log_store query --logstore <metricstore>` + SPL 管道 `.metricstore \| prom-call promql_query_range('<PromQL>')` |
+| `prometheus_query` | K8s Prometheus 指标 | `metric_store query --prometheus-instance-id <id>` 或同上 SPL 管道 |
+| `cloudmonitor_entity` | CloudMonitor 云产品指标（RDS/Redis/ECS） | `metric_store query --entity-domain acs --entity-type <type> --entity-id <id>` |
+| `sls_logstore` | SLS LogStore 日志衍生时序 | `log_store query` + SLS SQL/SPL |
+
+# 执行流程
+
+## Step 1: 加载与校验 Profile
+
+读取 Mission Profile JSON，校验必填字段完整性。
+
+- 校验 `workspace`、`region`、`time_range` 非空
+- 校验每个 `forecast_target` 有 `target_id`、`object_ref`、`data_source`、至少一个 `signal`
+- 校验 `data_source.type` 是已知类型之一
+- 将 `context` 中的键值对替换到 `query_template` 的 `{{variable}}` 占位符
+
+**成功标准**：Profile 解析通过，所有 target 的 query_template 已完成变量替换。
+**产出物**：resolved_targets 列表（供 Step 2 消费）。
+
+## Step 2: 取数
+
+按 `data_source.type` 路由到对应的取数模板（详见 `references/data-source-templates.md`）。
+
+对每个 resolved_target 的每个 signal，执行 CLI 命令获取时间序列数据。
+
+### 取数路由
+
+| data_source.type | CLI 命令模式 |
+|---|---|
+| `metricstore_prom_call` | `starops observe log_store query --region <r> --project <p> --logstore <store> --query "<SPL>" --time-range '<tr>'` |
+| `prometheus_query` | `starops observe metric_store query --prometheus-instance-id <id> --region <r> --query "<PromQL>" --time-range '<tr>'` |
+| `cloudmonitor_entity` | `starops observe metric_store query -w <ws> --entity-domain acs --entity-type <type> --entity-id <id> --metric-set-domain <msd> --metric-set-name <msn> --query "<metric>" --time-range '<tr>' --raw` |
+| `sls_logstore` | `starops observe log_store query --region <r> --project <p> --logstore <store> --query "<SLS_SQL>" --time-range '<tr>'` |
+
+**成功标准**：每个 signal 返回非空时间序列数据。
+**失败处理**：单个 signal 取数失败标记 `status=error`，不阻断其他 target。
+
+## Step 3: 序列构造
+
+确保取到的数据是等间隔时间序列，且数据点数 >= 200（series_forecast 最低要求）。
+
+- 检查时间粒度：`time_granularity` 从 series_describe 返回或从数据间隔推算
+- 如果数据点 < 200：
+  - 尝试扩大 time_range（如 last_24h → last_7d）
+  - 如果仍不足，标记 `status=error, error="insufficient_data_points"`
+- 如果数据有缺失点（missing_point_count > 0），记录但不阻断
+
+**成功标准**：每个 signal 有 >= 200 个等间隔数据点。
+**产出物**：validated_series 列表。
+
+## Step 4: 统计描述（series_describe）
+
+对每个 signal 的时间序列执行 `series_describe`，获取统计特征。
+
+### SPL 管道
+
+```
+.metricstore | prom-call promql_query_range('<resolved_promql>') | extend desc = series_describe(__value__)
+```
+
+### 解析 desc 返回值
+
+`desc` 是 2 元素数组，`desc[0]` 为 JSON 字符串，解析后包含：
+
+| 字段 | 含义 |
+|------|------|
+| `max / min / mean / sum / std` | 基础统计量 |
+| `p5 / p25 / p50 / p75 / p95` | 分位数 |
+| `actual_point_count` | 实际数据点数 |
+| `missing_point_count` | 缺失点数 |
+| `time_granularity` | 时间粒度（纳秒） |
+| `segments[]` | 分段形状检测（STABLE_PLATEAU / STEP_UP / SPIKE_RECOVERY / CURVED_PEAK 等） |
+| `transitions[]` | 转换点检测（含置信度） |
+
+**成功标准**：desc 解析成功，segments 和 transitions 非空。
+**产出物**：describe_results（供 Step 8 报告消费）。
+
+## Step 5: 预测（series_forecast）
+
+对每个 signal 的时间序列执行 `series_forecast`，获取未来 N 步预测值 + 上下界。
+
+### SPL 管道
+
+```
+.metricstore | prom-call promql_query_range('<resolved_promql>') | extend ret = series_forecast(__value__, <forecast_step>)
+```
+
+### 解析 ret 返回值
+
+`ret` 是 8 元素数组：
+
+| 索引 | 含义 |
+|:----:|------|
+| ret[0] | 完整时间戳序列（历史 + 预测），纳秒 |
+| ret[1] | 完整值序列（历史值 + null 填充预测位） |
+| ret[2] | **预测值数组**（历史段为拟合值，后 N 步为外推预测） |
+| ret[3] | **上界数组** |
+| ret[4] | **下界数组** |
+| ret[5] | 输入数据点数 |
+| ret[6] | 预测步数 |
+| ret[7] | 保留（null） |
+
+### 提取关键值
+
+- `predicted_values`：ret[2] 后 forecast_step 个非 null 值
+- `upper_bound`：ret[3] 后 forecast_step 个值
+- `lower_bound`：ret[4] 后 forecast_step 个值
+- `predicted_max`：predicted_values 的最大值
+- `predicted_min`：predicted_values 的最小值
+- `predicted_trend`：predicted_values 的线性斜率
+
+**成功标准**：ret 解析成功，predicted_values 非空。
+**产出物**：forecast_results（供 Step 6 阈值评估消费）。
+
+## Step 6: 阈值计算与风险评估
+
+对每个 signal，基于预测值与阈值比较，评估风险等级。
+
+### 评估逻辑
+
+```
+对于 direction=higher_is_worse 的信号：
+  if predicted_max >= critical_threshold → risk_level = Critical
+  elif predicted_max >= warning_threshold → risk_level = Warning
+  else → risk_level = Normal
+
+对于 direction=lower_is_worse 的信号：
+  if predicted_min <= critical_threshold → risk_level = Critical
+  elif predicted_min <= warning_threshold → risk_level = Warning
+  else → risk_level = Normal
+```
+
+### 多信号归并
+
+同一 target 有多个 signal 时，取最高风险等级：
+- 任一 Critical → target risk = Critical
+- 任一 Warning → target risk = Warning
+- 全部 Normal → target risk = Normal
+
+### 触阈时间估算
+
+从 predicted_values 中找到首次超过阈值的索引 i，触阈时间 = 当前时间 + i * time_granularity。
+
+**成功标准**：每个 target 有 risk_level 和触阈时间（或"未触阈"）。
+**产出物**：risk_assessments。
+
+## Step 7: 风险归并与共振检测
+
+跨 target 跨 signal 归并风险，检测共振事件。
+
+### 共振检测逻辑
+
+当 `resonance.enabled=true` 时：
+
+1. 按 `resonance.group_by` 分组（如 chain=checkout 链路下的所有服务）
+2. 在每个分组内，检查是否有 >= `resonance.min_signals` 个信号同时满足：
+   - risk_level >= Warning
+   - direction 同向（同时恶化）
+   - 触阈时间在同一个时间窗口内（如 24h 内）
+3. 满足条件 → 标记为 resonance 事件，risk_level 提升一级
+
+### 共振类型
+
+| 类型 | 含义 |
+|------|------|
+| `multi_signal_resonance` | 同一对象的多个信号同时恶化（如 checkout 的 latency + error_rate + CPU 同时上升） |
+| `multi_object_resonance` | 同一 chain/namespace 下多个对象同时恶化（如 checkout + inventory + payment 同时 latency 上升） |
+| `cascading_resonance` | 上游对象的预测恶化与下游对象的预测恶化存在因果关系链 |
+
+**成功标准**：共振检测结果已生成（或确认无共振）。
+**产出物**：resonance_events。
+
+## Step 8: Investigation Handoff（可选）
+
+当存在 Critical 风险或共振事件时，将预测结果交给 InvestigationAgent 做深度根因分析。
+
+### Handoff 内容
+
+```
+预测结果摘要：
+- <target_id>: <signal_id> 预测值 <predicted_max> 将在 <触阈时间> 超过 <threshold>
+  - 当前值: <current_value>, 预测趋势: <predicted_trend>
+  - segments: <segment_shape_summary>
+  - 置信度: 基于上下界宽度
+
+实体关系：
+- <object_ref> 的上下游关系（来自 Profile 或 UModel）
+
+时间窗口：
+- <time_range>
+
+阈值来源：
+- <threshold_source_description>
+
+候选维度：
+- <candidate_dimensions>
+```
+
+**成功标准**：InvestigationAgent 返回根因分析（或标记为跳过）。
+
+## Step 9: 报告输出与通知
+
+### 风险报告 JSON 结构
+
+```json
+{
+  "profile_id": "string",
+  "execution_time": "ISO8601",
+  "time_range": "last_24h",
+  "summary": {
+    "total_targets": 8,
+    "critical": 1,
+    "warning": 2,
+    "normal": 5,
+    "errors": 0,
+    "resonance_events": 1
+  },
+  "risk_items": [
+    {
+      "target_id": "checkout_request_count",
+      "object_name": "checkout",
+      "object_ref": {"domain": "apm", "type": "apm.service", "id": "..."},
+      "signal_id": "request_count",
       "risk_level": "warning",
-      "time_range": "last_6h",
-      "entity_id": "i-xxx",
-      "entity_name": "web-server-01",
-      "current_value": 78.5,
-      "warning_threshold": 85.0,
-      "critical_threshold": 95.0,
-      "deriv_value": 2.3,
-      "predicted_value": 92.1,
-      "days_to_warning": 3.5,
-      "raw_query": "avg by (instance_id) (AliyunEcs_CPUUtilization)",
-      "error": ""
+      "current_value": 107.67,
+      "predicted_max": 125.3,
+      "predicted_values": [102.48, 103.06, ...],
+      "upper_bound": [119.83, 120.28, ...],
+      "lower_bound": [87.17, 87.62, ...],
+      "warning_threshold": 120,
+      "critical_threshold": 150,
+      "threshold_breach_time": "2026-07-02T06:00:00+08:00",
+      "confidence": "medium",
+      "segments": [{"shape": "STABLE_PLATEAU", "confidence": 0.94}, ...],
+      "transitions": [{"type": "TREND_REVERSAL_TRANSITION", "confidence": 0.999}],
+      "data_quality": {"actual_points": 289, "missing_points": 0},
+      "evidence": "series_forecast 预测 30 步后最大值 125.3 超过 warning 阈值 120",
+      "counter_evidence": "上下界宽度 32.66，置信度中等",
+      "gaps": "P99/P95 不可用，仅使用 avg + error_rate 多信号收敛"
+    }
+  ],
+  "resonance_events": [
+    {
+      "type": "multi_signal_resonance",
+      "group": "checkout_chain",
+      "targets": ["checkout_latency", "checkout_error_rate", "checkout_cpu"],
+      "description": "checkout 服务 latency + error_rate + CPU 三信号同时恶化",
+      "severity": "critical"
     }
   ]
 }
 ```
 
-### 状态枚举
+### 通知规则
 
-| status | 含义 |
-|---|---|
-| `pass` | 所有实体均通过风险评估 |
-| `find_problem` | 发现容量风险实体 |
-| `no_problem_found` | 无数据或无匹配实体 |
-| `error` | 查询失败（超时、权限、解析错误） |
+按 Profile 中 `notification` 配置执行：
 
----
+| 条件 | 默认行为 |
+|------|----------|
+| 所有 target risk_level = Normal | 静默（不通知） |
+| 任一 target risk_level = Warning | 通知 |
+| 任一 target risk_level = Critical | 通知 |
+| 存在 resonance_event | 通知 |
 
-## 确定性设计原则
+### 可读 Markdown 报告
 
-### 架构模式：数据驱动声明 + 公共引擎
+使用 `references/report-template.md` 模板生成可读报告，包含：
+- 总览（critical/warning/normal 计数）
+- 风险项列表（按 risk_level 降序）
+- 共振事件详情
+- 每个风险项的证据、反证、缺口
 
-- **业务脚本**（infra / k8s / apm / log）：只声明巡检项配置（`PredictionCase`），**零计算逻辑**
-- **公共引擎**（capacity_prediction_common.py + capacity_prediction_engine.py）：承载所有计算
-- **新增巡检项 = 新增一个 `PredictionCase` 数据项**，不需要写新的计算代码
+**成功标准**：JSON 报告 + Markdown 报告均已生成。
 
-### 确定性保证
+# 常见错误处理
 
-- 所有数值计算函数为**纯函数**（无随机数、无当前时间依赖、无全局状态）
-- **同输入同输出**（可复跑验证）
-- 脚本独立可运行（不依赖 Skill 上下文）
-- 错误处理结构化（超时、解析失败、权限不足都返回 `{"status": "error", "error": "..."}`）
+| 错误 | 原因 | 降级策略 |
+|------|------|----------|
+| `batch prediction failed` | 数据点 < 200 | 扩大 time_range（last_24h → last_7d），或降低粒度 |
+| `Column '__value__' cannot be resolved` | 使用了 SQL 语法而非 SPL 管道 | 改用 `.metricstore \| prom-call ...` SPL 管道语法 |
+| `strictly increasing timestamp` | 在 logstore-tracing 上使用 series_forecast | 改用 metricstore 路径 |
+| PromQL parser 拒绝 `\|` | 在 metric_store query 中使用 SPL | 改用 log_store query + SPL 管道 |
+| 空结果 | 无匹配数据 | 标记 `no_problem_found`，不重试 |
+| 超时 | 查询范围过大 | 缩小 time_range 或减少 forecast_targets 并行度 |
 
----
+# 参考文件
 
-## 诊断逻辑流
-
-```
-用户请求容量风险预测
-    │
-    ├─ 1. 列 todo list（明确域与巡检项）
-    │
-    ├─ 2. 并行执行四个脚本
-    │   ├─ infra-capacity-prediction.py  → 6 项 acs 资源
-    │   ├─ k8s-capacity-prediction.py    → 3 项 k8s 资源
-    │   ├─ apm-risk-prediction.py        → 3 项 apm 服务
-    │   └─ log-capacity-prediction.py    → 3 项 log 时序
-    │
-    ├─ 3. 聚合 JSON 输出
-    │   ├─ 统计 critical / warning / normal / error
-    │   └─ 提取 find_problem 项的预测值与剩余天数
-    │
-    ├─ 4. 生成报告（references/report-template.md）
-    │   ├─ 风险状态总览
-    │   ├─ 按域分组的详细评估
-    │   └─ 整体建议
-    │
-    └─ 5. 输出结论与建议
-```
-
----
-
-## Routing
-
-| 用户意图 | 路由 |
-|---|---|
-| "容量风险预测" / "容量评估" / "饱和度分析" | 并行执行四个脚本 |
-| "只看 acs 资源" / "ECS/RDS/Redis 容量" | `infra-capacity-prediction.py` |
-| "只看 k8s" / "Node/Pod 容量" | `k8s-capacity-prediction.py` |
-| "只看 APM" / "服务错误率/延迟/QPS" | `apm-risk-prediction.py` |
-| "只看日志" / "日志量预测" / "错误率异常" | `log-capacity-prediction.py` |
-| "列出巡检项" | 任一脚本 `--list-cases` |
-| "指定巡检项" | `--cases ecs_cpu_trend rds_cpu_trend` |
-
----
-
-## 参考文件
-
-| 文件 | 用途 |
-|---|---|
-| `references/execution-strategy.md` | 工具路线、批量执行、参数说明、JSON 结构 |
-| `references/report-template.md` | 报告模板 |
-| `references/promql-templates.md` | PromQL 策略模板库（5 种 PromQL 策略） |
-| `references/sls-sql-templates.md` | SLS SQL 策略模板库（2 种 Log 域策略） |
-| `references/infra.md` | acs 域巡检项清单与修复建议 |
-| `references/k8s.md` | k8s 域巡检项清单与修复建议 |
-| `references/apm.md` | apm 域巡检项清单与修复建议 |
-| `references/log.md` | log 域巡检项清单与修复建议 |
+| 文件 | 用途 | 何时读取 |
+|------|------|----------|
+| `references/data-source-templates.md` | 各数据源的 SPL/PromQL 查询模板与 CLI 命令模式 | Step 2 取数前 |
+| `references/report-template.md` | 风险报告 Markdown 模板 | Step 9 生成报告时 |
+| `scripts/runtime_engine.py` | 执行引擎脚本（Profile 解析、结果解析、阈值评估、共振检测） | Step 1-9 全程 |

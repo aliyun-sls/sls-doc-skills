@@ -1,75 +1,103 @@
 # 容量风险预测报告模板
 
-## 报告头部
+## 使用说明
 
+Step 9 生成报告时，使用以下模板渲染 Markdown 报告。将 JSON 报告中的数据填入对应位置。
+
+---
+
+## 模板
+
+```markdown
+# 容量风险预测报告
+
+**Profile**: {{profile_id}}
+**执行时间**: {{execution_time}}
+**时间窗口**: {{time_range}}
+**Region**: {{region}}
+
+---
+
+## 总览
+
+| 指标 | 数量 |
+|------|:----:|
+| 预测对象总数 | {{summary.total_targets}} |
+| Critical | {{summary.critical}} |
+| Warning | {{summary.warning}} |
+| Normal | {{summary.normal}} |
+| 错误 | {{summary.errors}} |
+| 共振事件 | {{summary.resonance_events}} |
+
+---
+
+## 风险项列表
+
+{{#each risk_items}}
+### {{risk_level | upper}} - {{object_name}} / {{signal_id}}
+
+| 属性 | 值 |
+|------|-----|
+| 对象 | {{object_name}} ({{object_ref.domain}}/{{object_ref.type}}) |
+| 信号 | {{signal_id}} |
+| 风险等级 | **{{risk_level}}** |
+| 当前值 | {{current_value}} |
+| 预测最大值 | {{predicted_max}} |
+| Warning 阈值 | {{warning_threshold}} |
+| Critical 阈值 | {{critical_threshold}} |
+| 预计触阈时间 | {{threshold_breach_time}} |
+| 置信度 | {{confidence}} |
+
+**预测趋势**:
+- 预测值范围: [{{predicted_min}}, {{predicted_max}}]
+- 上界（最新）: {{upper_bound_last}}
+- 下界（最新）: {{lower_bound_last}}
+
+**序列特征**:
+{{#each segments}}
+- Segment {{@index}}: {{shape}} (confidence: {{confidence}})
+{{/each}}
+
+{{#if transitions.length}}
+**转换点**:
+{{#each transitions}}
+- {{type}} (confidence: {{confidence}})
+{{/each}}
+{{/if}}
+
+**数据质量**: actual={{data_quality.actual_points}}, missing={{data_quality.missing_points}}
+
+**证据**: {{evidence}}
+
+**反证**: {{counter_evidence}}
+
+**缺口**: {{gaps}}
+
+---
+{{/each}}
+
+## 共振事件
+
+{{#if resonance_events.length}}
+{{#each resonance_events}}
+### {{type}} - {{group}}
+
+- **涉及对象**: {{targets | join ", "}}
+- **严重程度**: {{severity}}
+- **描述**: {{description}}
+
+{{/each}}
+{{else}}
+无共振事件。
+{{/if}}
+
+---
+
+## 方法论说明
+
+- **预测函数**: series_forecast（SLS SPL 管道函数）
+- **统计描述**: series_describe（SLS SPL 管道函数）
+- **数据源**: 见各风险项的数据源类型
+- **阈值来源**: Mission Profile 注入
+- **共振检测**: 多信号同向恶化 + 时间窗口对齐
 ```
-容量风险预测报告
-====================
-生成时间: {timestamp}
-Region: {region}
-时间范围: {time_range}
-```
-
-## 风险状态总览
-
-```
-风险总览
---------
-总巡检项: {total_cases}
-Critical: {critical_cases}
-Warning:  {warning_cases}
-Normal:   {normal_cases}
-Error:    {errors}
-无数据:   {no_problem_found}
-```
-
-## 按域分组详情
-
-### acs 基础资源
-
-| case_id | 实体 | 当前值 | 策略 | 风险等级 | 预测值 | 剩余天数 | 建议 |
-|---|---|---|---|---|---|---|---|
-| {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {predicted_value} | {days_to_warning} | {action} |
-
-### k8s 集群资源
-
-| case_id | 实体 | 当前值 | 策略 | 风险等级 | 预测值 | 剩余天数 | 建议 |
-|---|---|---|---|---|---|---|---|
-| {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {predicted_value} | {days_to_warning} | {action} |
-
-### apm 业务服务
-
-| case_id | 实体 | 当前值 | 策略 | 风险等级 | 偏离比 | 超标幅度 | 建议 |
-|---|---|---|---|---|---|---|---|
-| {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {deviation_ratio} | {exceed_percent} | {action} |
-
-### log 日志衍生时序
-
-| case_id | 实体 | 当前值 | 策略 | 风险等级 | 预测值 | 异常比例 | 建议 |
-|---|---|---|---|---|---|---|---|
-| {case_id} | {entity_name} | {current_value} | {strategy} | {risk_level} | {arima_predicted_value} | {anomaly_ratio} | {action} |
-
-## 整体建议
-
-### Critical 项
-
-- **立即处理**：{critical_items}
-- 建议操作：扩容、优化代码、增加资源配额
-
-### Warning 项
-
-- **24 小时内处理**：{warning_items}
-- 建议操作：制定扩容计划、优化资源使用
-
-### Normal 项
-
-- 持续观察，无需立即操作
-
-## 建议行动矩阵
-
-| 风险等级 | 剩余天数 | 建议行动 |
-|---|---|---|
-| Critical | < 1 天 | 立即扩容或降级 |
-| Warning | 1-7 天 | 制定扩容计划 |
-| Warning | 7-30 天 | 纳入容量规划 |
-| Normal | > 30 天 | 持续观察 |
