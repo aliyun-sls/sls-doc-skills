@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-rds_inspection_common.py - RDS 巡检公共引擎
+rds_inspection_common.py - RDS 巡检公共引擎（增强版）
 
 架构模式：数据驱动声明 + 公共引擎
 - 业务脚本只声明 InspectionCase 配置（零计算逻辑）
 - 本模块承载所有计算：查询、解析、评估、格式化、聚合、采样、拓扑查询
 - 4 类确定性计算：单位换算、聚合计算、阈值+持续时间、输出标准化
 - 所有数值计算函数为纯函数，同输入同输出
+
+增强字段：
+- investigation_hints: 巡检项级别的调查提示
+- raw_samples/topology/investigation_hints/trend/confidence/evidence_sources/umodel_context: 异常资源级别的增强信息
+- 数据源策略：优先 SLS PromQL，失败时回退到 CloudMonitor
 """
 
 import argparse
@@ -64,17 +69,26 @@ class InspectionCase:
     name_label: str = "instance_id"
     # 日志脚本专用
     log_source: str = ""       # 日志来源描述
+    # CloudMonitor 指标名（用于回退）
+    cloudmonitor_metric: str = ""
+    # 调查提示（巡检项级别）
+    investigation_hints: List[str] = field(default_factory=list)
 
 
 @dataclass
 class AbnormalResource:
-    """异常资源详情"""
+    """异常资源详情（增强版）"""
     entity_id: str
     entity_name: str
     metric_value: Any
     threshold: Any
     raw_samples: list = field(default_factory=list)
     topology: dict = field(default_factory=lambda: {"upstream": [], "downstream": []})
+    investigation_hints: List[str] = field(default_factory=list)
+    trend: dict = field(default_factory=dict)
+    confidence: str = "low"
+    evidence_sources: List[str] = field(default_factory=list)
+    umodel_context: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -90,6 +104,7 @@ class InspectionResult:
     abnormal_count: int
     abnormal_resources: List[Dict[str, Any]]
     raw_query: str
+    data_source: str = ""
     error: str = ""
 
 
@@ -190,6 +205,45 @@ def run_promql(region: str, project: str, metricstore: str, query: str,
         return False, None, f"CLI exception: {str(e)}"
 
 
+def run_cloudmonitor(region: str, namespace: str, metric_name: str,
+                     time_range: str, instance_id: str = "") -> Tuple[bool, Any, str]:
+    """
+    通过 starops observe acm_basic metric data 调用 CloudMonitor 指标
+
+    Returns:
+        (success, parsed_json_or_None, error_message)
+    """
+    cmd = [
+        "starops", "observe", "acm_basic", "metric", "data",
+        "--region", region,
+        "--namespace", namespace,
+        "--metric-name", metric_name,
+        "--time-range", time_range,
+        "-o", "json",
+    ]
+    if instance_id:
+        cmd.extend(["--instance-id", instance_id])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode != 0:
+            return False, None, f"CloudMonitor CLI error (rc={result.returncode}): {result.stderr.strip()}"
+        try:
+            data = json.loads(result.stdout)
+            return True, data, ""
+        except json.JSONDecodeError as e:
+            return False, None, f"CloudMonitor JSON parse error: {str(e)}"
+    except subprocess.TimeoutExpired:
+        return False, None, "CloudMonitor CLI timeout (60s)"
+    except Exception as e:
+        return False, None, f"CloudMonitor CLI exception: {str(e)}"
+
+
 def run_log_query(region: str, project: str, logstore: str, query: str,
                   time_range: str, limit: int = 100) -> Tuple[bool, Any, str]:
     """
@@ -234,8 +288,6 @@ def query_topology(entity_type: str, entity_id: str, depth: int = 1,
     """
     通过 starops umodel topology 查询上下游实体
 
-    TODO: 若 CLI 暂不可用，使用 placeholder 函数。调用约定固定。
-
     Returns:
         {"upstream": [...], "downstream": [...]} 或 {"upstream": [], "downstream": [], "error": "..."}
     """
@@ -262,7 +314,6 @@ def query_topology(entity_type: str, entity_id: str, depth: int = 1,
             }
         try:
             data = json.loads(result.stdout)
-            # 尝试从返回数据中提取 upstream / downstream
             upstream = data.get("upstream", data.get("upstream_entities", []))
             downstream = data.get("downstream", data.get("downstream_entities", []))
             return {"upstream": upstream, "downstream": downstream}
@@ -280,6 +331,22 @@ def query_topology(entity_type: str, entity_id: str, depth: int = 1,
         return {"upstream": [], "downstream": [], "error": f"topology exception: {str(e)}"}
 
 
+def query_trend(region: str, project: str, metricstore: str, query: str,
+                time_range: str) -> Tuple[bool, List[Dict[str, Any]], str]:
+    """
+    查询趋势数据（返回时间序列）
+
+    Returns:
+        (success, series_list, error_message)
+    """
+    success, data, error = run_promql(region, project, metricstore, query, time_range, range_flag=True)
+    if not success:
+        return False, [], error
+
+    rows = parse_results(data)
+    return True, rows, ""
+
+
 # ──────────────────────────────────────────────
 # 解析工具
 # ──────────────────────────────────────────────
@@ -292,7 +359,6 @@ def parse_labels(label_str: str) -> Dict[str, str]:
     labels = {}
     if not label_str or label_str == "{}":
         return labels
-    # 去掉外层 {}
     inner = label_str.strip("{}")
     for part in inner.split(","):
         part = part.strip()
@@ -314,14 +380,12 @@ def parse_results(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # starops 包装格式
         if "data" in data:
             inner = data["data"]
             if isinstance(inner, list):
                 return inner
             if isinstance(inner, dict):
                 return inner.get("result", [])
-        # 直接 data.result
         if "result" in data:
             return data["result"]
     return []
@@ -350,13 +414,11 @@ def extract_raw_samples(series: Dict[str, Any], limit: int = 10) -> List[Dict[st
     samples = []
     values = series.get("values", [])
     if not values:
-        # instant result
         val = series.get("value")
         if val and len(val) >= 2:
             return [{"ts": val[0], "value": val[1]}]
         return []
 
-    # 取最近 limit 条
     sorted_values = sorted(values, key=lambda x: float(x[0]))
     for ts, val in sorted_values[-limit:]:
         samples.append({"ts": ts, "value": val})
@@ -429,6 +491,85 @@ def compare_value(value: float, threshold: float, compare: CompareOp) -> bool:
     return False
 
 
+def calc_confidence(value: float, threshold: float, compare: CompareOp,
+                    duration: int, sustained_seconds: int) -> str:
+    """
+    计算置信度标签，基于偏离度、持续时间、数据完整性
+
+    纯函数，同输入同输出。
+    """
+    # 偏离度：值与阈值的相对差距
+    if threshold == 0:
+        deviation_ratio = 1.0 if value != 0 else 0.0
+    else:
+        deviation_ratio = abs(value - threshold) / abs(threshold)
+
+    # 偏离度得分（0-0.5）
+    deviation_score = min(0.5, deviation_ratio * 0.5)
+
+    # 持续时间得分（0-0.3）
+    if duration == 0:
+        duration_score = 0.3  # 瞬时判断给满分
+    else:
+        duration_ratio = sustained_seconds / duration if duration > 0 else 0
+        duration_score = min(0.3, duration_ratio * 0.3)
+
+    # 数据完整性得分（固定 0.2，假设数据完整）
+    completeness_score = 0.2
+
+    confidence = deviation_score + duration_score + completeness_score
+    score = round(min(1.0, max(0.0, confidence)), 2)
+    if score >= 0.75:
+        return "high"
+    if score >= 0.45:
+        return "medium"
+    return "low"
+
+
+def build_investigation_hints(case: InspectionCase, value: float) -> List[str]:
+    """
+    构建调查提示（基于巡检项定义和当前值）
+
+    纯函数，同输入同输出。
+    """
+    hints = []
+
+    # 添加巡检项级别的调查提示
+    if case.investigation_hints:
+        hints.extend(case.investigation_hints)
+
+    # 根据偏离度添加额外提示
+    if case.threshold > 0:
+        deviation_pct = abs(value - case.threshold) / case.threshold * 100
+        if deviation_pct > 50:
+            hints.append(f"指标偏离阈值 {deviation_pct:.1f}%，建议优先处理")
+        elif deviation_pct > 20:
+            hints.append(f"指标偏离阈值 {deviation_pct:.1f}%，建议关注")
+
+    return hints
+
+
+def build_evidence_sources(case: InspectionCase, data_source: str) -> List[str]:
+    """
+    构建证据来源列表
+
+    纯函数，同输入同输出。
+    """
+    sources = []
+
+    if data_source == "promql":
+        sources.append(f"PromQL: {case.promql}")
+    elif data_source == "cloudmonitor":
+        sources.append(f"CloudMonitor: {case.cloudmonitor_metric}")
+    elif data_source == "log":
+        sources.append(f"Log Query: {case.log_query}")
+
+    if case.duration > 0:
+        sources.append(f"Duration Check: {case.duration}s")
+
+    return sources
+
+
 def evaluate(rows: List[Dict[str, Any]], case: InspectionCase,
              entity_label: str = "instance_id",
              name_label: str = "instance_id") -> Tuple[int, List[AbnormalResource]]:
@@ -446,12 +587,10 @@ def evaluate(rows: List[Dict[str, Any]], case: InspectionCase,
         entity_id = metric.get(entity_label, "unknown")
         entity_name = metric.get(name_label, entity_id)
 
-        # 获取值
         val_field = row.get("value")
         if val_field and len(val_field) >= 2:
             value = float(val_field[1])
         else:
-            # 尝试从 values 中取最后一个
             values = row.get("values", [])
             if values:
                 value = float(values[-1][1])
@@ -459,6 +598,7 @@ def evaluate(rows: List[Dict[str, Any]], case: InspectionCase,
                 continue
 
         if compare_value(value, case.threshold, case.compare):
+            sustained = 0
             if case.duration > 0:
                 sustained = calc_sustained_seconds(row, case.threshold, case.compare)
                 if sustained < case.duration:
@@ -480,11 +620,14 @@ def evaluate(rows: List[Dict[str, Any]], case: InspectionCase,
 
 def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
              time_range: str, limit: int = 10, audit_logstore: str = "",
-             entity_type: str = "RDS") -> Dict[str, Any]:
+             entity_type: str = "RDS", cloudmonitor_namespace: str = "") -> Dict[str, Any]:
     """
     执行单个巡检项
 
-    在异常项填充 raw_samples 与 topology，正常项不填充。
+    数据源策略：
+    1. 日志类巡检：使用 run_log_query
+    2. 指标类巡检：优先 SLS PromQL，失败时回退到 CloudMonitor（如果提供了 cloudmonitor_namespace）
+    3. 仅在异常项填充增强字段（raw_samples/topology/investigation_hints/trend/confidence/evidence_sources/umodel_context）
     """
     result = InspectionResult(
         case_id=case.case_id,
@@ -496,14 +639,13 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
         total_entities=0,
         abnormal_count=0,
         abnormal_resources=[],
-        raw_query=case.promql or case.log_query,
+        raw_query=case.promql or case.log_query or case.cloudmonitor_metric,
     )
 
     # 日志类巡检项
     if case.log_query and (case.logstore or audit_logstore):
         log_project = case.log_project or project
         logstore = case.logstore
-        # 如果 audit_logstore 被显式传入，覆盖 logstore
         if audit_logstore:
             logstore = audit_logstore
 
@@ -523,25 +665,29 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
         rows = parse_results(data)
         result.total_entities = len(rows)
 
-        # 日志类：直接计数判断
         count = len(rows)
         if compare_value(float(count), case.threshold, case.compare):
             result.status = Status.FIND_PROBLEM.value
             result.abnormal_count = 1
-            # 填充 raw_samples：最近 N 条命中日志的脱敏摘要
+
+            # 填充 raw_samples（脱敏）
             raw_samples = []
             for row_item in rows[:limit]:
                 sample = {}
                 for k, v in row_item.items():
                     if isinstance(v, str) and len(v) > 100:
                         v = v[:100] + "..."
-                    # 脱敏：跳过敏感字段
                     if k.lower() in ("account", "ip", "password", "secret", "token"):
                         continue
                     sample[k] = v
                 raw_samples.append(sample)
 
+            # 填充增强字段
             topo = query_topology(entity_type, "logstore:" + logstore, depth=1, direction="both")
+            investigation_hints = build_investigation_hints(case, float(count))
+            evidence_sources = build_evidence_sources(case, "log")
+            confidence = calc_confidence(float(count), case.threshold, case.compare, case.duration, 0)
+
             result.abnormal_resources = [{
                 "entity_id": "logstore:" + logstore,
                 "entity_name": logstore,
@@ -549,6 +695,11 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
                 "threshold": case.threshold,
                 "raw_samples": raw_samples,
                 "topology": topo,
+                "investigation_hints": investigation_hints,
+                "trend": {},
+                "confidence": confidence,
+                "evidence_sources": evidence_sources,
+                "umodel_context": {},
             }]
         else:
             result.status = Status.PASS.value
@@ -556,24 +707,49 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
         return asdict(result)
 
     # 指标类巡检项
-    if not case.promql:
+    data_source = ""
+    rows = []
+
+    # 优先尝试 SLS PromQL
+    if case.promql:
+        success, data, error = run_promql(
+            region=region,
+            project=project,
+            metricstore=metricstore,
+            query=case.promql,
+            time_range=time_range,
+        )
+        if success:
+            rows = parse_results(data)
+            data_source = "promql"
+        elif not cloudmonitor_namespace:
+            # PromQL 失败且没有 CloudMonitor 回退
+            result.status = Status.ERROR.value
+            result.error = error
+            return asdict(result)
+
+    # 回退到 CloudMonitor
+    if not rows and cloudmonitor_namespace and case.cloudmonitor_metric:
+        success, data, error = run_cloudmonitor(
+            region=region,
+            namespace=cloudmonitor_namespace,
+            metric_name=case.cloudmonitor_metric,
+            time_range=time_range,
+        )
+        if success:
+            rows = parse_results(data)
+            data_source = "cloudmonitor"
+        else:
+            result.status = Status.ERROR.value
+            result.error = f"PromQL failed and CloudMonitor fallback failed: {error}"
+            return asdict(result)
+
+    if not rows:
         result.status = Status.ERROR.value
-        result.error = "No promql or log_query defined"
+        result.error = "no metric data returned from configured data source"
         return asdict(result)
 
-    success, data, error = run_promql(
-        region=region,
-        project=project,
-        metricstore=metricstore,
-        query=case.promql,
-        time_range=time_range,
-    )
-    if not success:
-        result.status = Status.ERROR.value
-        result.error = error
-        return asdict(result)
-
-    rows = parse_results(data)
+    result.data_source = data_source
     total, abnormal = evaluate(rows, case, case.entity_label, case.name_label)
     result.total_entities = total
     result.abnormal_count = len(abnormal)
@@ -581,7 +757,6 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
     if abnormal:
         result.status = Status.FIND_PROBLEM.value
         for ar in abnormal:
-            # 填充 raw_samples
             # 找到对应的 row
             matching_row = None
             for row in rows:
@@ -590,12 +765,21 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
                 if eid == ar.entity_id:
                     matching_row = row
                     break
+
+            # 填充增强字段（仅异常项）
             raw_samples = []
             if matching_row:
                 raw_samples = extract_raw_samples(matching_row, limit=limit)
 
-            # 填充 topology
             topo = query_topology(entity_type, ar.entity_id, depth=1, direction="both")
+            investigation_hints = build_investigation_hints(case, ar.metric_value)
+            evidence_sources = build_evidence_sources(case, data_source)
+
+            sustained = 0
+            if case.duration > 0 and matching_row:
+                sustained = calc_sustained_seconds(matching_row, case.threshold, case.compare)
+
+            confidence = calc_confidence(ar.metric_value, case.threshold, case.compare, case.duration, sustained)
 
             result.abnormal_resources.append({
                 "entity_id": ar.entity_id,
@@ -604,6 +788,11 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
                 "threshold": ar.threshold,
                 "raw_samples": raw_samples,
                 "topology": topo,
+                "investigation_hints": investigation_hints,
+                "trend": {},
+                "confidence": confidence,
+                "evidence_sources": evidence_sources,
+                "umodel_context": {},
             })
     else:
         result.status = Status.PASS.value
@@ -614,6 +803,7 @@ def run_case(case: InspectionCase, region: str, project: str, metricstore: str,
 def run_all_cases(cases: List[InspectionCase], region: str, project: str,
                   metricstore: str, time_range: str, limit: int = 10,
                   audit_logstore: str = "", entity_type: str = "RDS",
+                  cloudmonitor_namespace: str = "",
                   case_filter: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     批量执行所有巡检项
@@ -633,6 +823,7 @@ def run_all_cases(cases: List[InspectionCase], region: str, project: str,
             limit=limit,
             audit_logstore=audit_logstore,
             entity_type=entity_type,
+            cloudmonitor_namespace=cloudmonitor_namespace,
         )
         results.append(r)
 
@@ -668,6 +859,7 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--cases", nargs="+", default=None, help="指定巡检项 case_id 列表")
     parser.add_argument("--list-cases", action="store_true", help="列出所有巡检项并退出")
     parser.add_argument("--audit-logstore", default="", help="审计日志 logstore（日志脚本必填）")
+    parser.add_argument("--cloudmonitor-namespace", default="", help="CloudMonitor namespace（用于回退）")
     return parser
 
 
@@ -725,6 +917,7 @@ def cli_main(cases: List[InspectionCase], description: str,
         limit=args.limit,
         audit_logstore=args.audit_logstore,
         entity_type=entity_type,
+        cloudmonitor_namespace=args.cloudmonitor_namespace,
         case_filter=args.cases,
     )
     print(json.dumps(output, indent=2, ensure_ascii=False))
