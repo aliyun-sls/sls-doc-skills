@@ -10,6 +10,7 @@
 | Region | {{region}} |
 | Project | {{project}} |
 | MetricStore | {{metricstore}} |
+| 数据源 | {{data_source_summary}} |
 
 ---
 
@@ -21,8 +22,16 @@
 | 通过 (pass) | {{passed}} |
 | 发现问题 (find_problem) | {{find_problem_cases}} |
 | 错误 (error) | {{errors}} |
-| 无数据 (no_problem_found) | {{no_problem_found}} |
+| 未发现问题 (no_problem_found) | {{no_problem_found}} |
 | **整体状态** | {{has_find_problem ? "⚠️ 发现问题" : "✅ 全部通过"}} |
+
+### 数据源使用情况
+
+| 数据源 | 使用次数 | 说明 |
+|---|---|---|
+| SLS PromQL | {{sls_promql_count}} | 首选数据源 |
+| CloudMonitor | {{cloudmonitor_count}} | 非趋势指标在 SLS PromQL 不可用时的备用数据源 |
+| SLS 日志查询 | {{sls_log_count}} | 关联日志专用 |
 
 ---
 
@@ -54,6 +63,26 @@
 
 ---
 
+## 趋势检测汇总
+
+### 高风险趋势（增长率异常）
+
+| 巡检项 | 当前值 | 增长率 | 阈值 | 趋势方向 | 数据完整性 |
+|---|---|---|---|---|---|
+{{#each high_risk_trends}}
+| {{item}} | {{metric_value}} | {{trend.growth_rate}}% | {{threshold}} | {{trend.trend_direction}} | {{trend.completeness}} |
+{{/each}}
+
+### 关注趋势（增长率异常）
+
+| 巡检项 | 当前值 | 增长率 | 趋势方向 | 备注 |
+|---|---|---|---|---|
+{{#each watch_trends}}
+| {{item}} | {{metric_value}} | {{trend.growth_rate}}% | {{trend.trend_direction}} | {{note}} |
+{{/each}}
+
+---
+
 ## 分维度详情
 
 ### 核心指标
@@ -62,6 +91,7 @@
 #### {{item}} ({{severity}})
 
 - **状态**: {{status}}
+- **数据源**: {{data_source}}
 - **总实体数**: {{total_entities}}
 - **异常数**: {{abnormal_count}}
 - **查询**: `{{raw_query}}`
@@ -90,6 +120,7 @@
 #### {{item}} ({{severity}})
 
 - **状态**: {{status}}
+- **数据源**: {{data_source}}
 - **总实体数**: {{total_entities}}
 - **异常数**: {{abnormal_count}}
 - **查询**: `{{raw_query}}`
@@ -118,6 +149,7 @@
 #### {{item}} ({{severity}})
 
 - **状态**: {{status}}
+- **数据源**: {{data_source}}
 - **总实体数**: {{total_entities}}
 - **异常数**: {{abnormal_count}}
 - **查询**: `{{raw_query}}`
@@ -146,6 +178,7 @@
 #### {{item}} ({{severity}})
 
 - **状态**: {{status}}
+- **数据源**: {{data_source}}
 - **总实体数**: {{total_entities}}
 - **异常数**: {{abnormal_count}}
 - **查询**: `{{raw_query}}`
@@ -168,6 +201,36 @@
 {{/each}}
 {{/each}}
 
+### 趋势检测
+
+{{#each trend_results}}
+#### {{item}} ({{severity}})
+
+- **状态**: {{status}}
+- **数据源**: {{data_source}}
+- **总实体数**: {{total_entities}}
+- **异常数**: {{abnormal_count}}
+- **查询**: `{{raw_query}}`
+{{#if error}}
+- **错误**: {{error}}
+{{/if}}
+{{#each abnormal_resources}}
+- **异常实例**: {{entity_id}}
+  - 当前值: {{metric_value}}
+  - 阈值: {{threshold}}
+  - 趋势分析:
+    - 趋势方向: {{trend.trend_direction}}
+    - 增长率: {{trend.growth_rate}}%
+    - 起始值: {{trend.start_value}}
+    - 结束值: {{trend.end_value}}
+    - 数据点: {{trend.data_points}}
+    - 完整性: {{trend.completeness}}
+  - 影响的上下游:
+    - 上游: {{#each topology.upstream}}{{entity_id}} ({{type}}){{/each}}
+    - 下游: {{#each topology.downstream}}{{entity_id}} ({{type}}){{/each}}
+{{/each}}
+{{/each}}
+
 ---
 
 ## 修复建议优先级
@@ -178,6 +241,12 @@
 - **{{item}}**: {{description}}
   - 影响实例: {{#each abnormal_resources}}{{entity_id}} {{/each}}
   - 建议: {{suggestion}}
+  {{#if investigation_hints}}
+  - 排查提示:
+    {{#each investigation_hints}}
+    - {{this}}
+    {{/each}}
+  {{/if}}
 {{/each}}
 
 ### 24 小时内处理（P2）
@@ -186,6 +255,12 @@
 - **{{item}}**: {{description}}
   - 影响实例: {{#each abnormal_resources}}{{entity_id}} {{/each}}
   - 建议: {{suggestion}}
+  {{#if investigation_hints}}
+  - 排查提示:
+    {{#each investigation_hints}}
+    - {{this}}
+    {{/each}}
+  {{/if}}
 {{/each}}
 
 ### 纳入优化计划（P3）
@@ -194,6 +269,12 @@
 - **{{item}}**: {{description}}
   - 影响实例: {{#each abnormal_resources}}{{entity_id}} {{/each}}
   - 建议: {{suggestion}}
+  {{#if investigation_hints}}
+  - 排查提示:
+    {{#each investigation_hints}}
+    - {{this}}
+    {{/each}}
+  {{/if}}
 {{/each}}
 
 ---
@@ -208,7 +289,8 @@
 | `rds-performance-inspection.py` | 6 | 性能 |
 | `rds-security-inspection.py` | 6 | 安全 |
 | `rds-logs-inspection.py` | 2 | 关联日志 |
-| **总计** | **21** | - |
+| `rds-trend-inspection.py` | 6 | 趋势检测 |
+| **总计** | **27** | - |
 
 ### 原始数据
 
@@ -216,4 +298,4 @@
 
 ### 确定性验证
 
-本 Skill 遵循确定性设计原则：同输入同输出。`raw_samples` 与 `topology` 为外部状态依赖字段，确定性验证时须剥离后对比。
+本 Skill 遵循确定性设计原则：同输入同输出。`raw_samples`、`topology` 与 `trend` 为外部状态依赖字段，确定性验证时须剥离后对比。

@@ -7,6 +7,8 @@ rds-logs-inspection.py - RDS 关联日志巡检（2 项）
 
 数据来源：关联的审计 / 错误日志 Logstore
 必须传入 --audit-logstore 参数。
+
+日志查询使用 SLS SQL 语法，通过公共引擎的 run_log_query 执行。
 """
 
 import sys
@@ -41,6 +43,13 @@ def build_cases(time_range: str = "") -> list:
             entity_label="instance_id",
             name_label="instance_id",
             log_source="审计日志",
+            investigation_hints=[
+                "分析慢 SQL 执行计划，定位性能瓶颈",
+                "检查是否缺少索引导致全表扫描",
+                "检查是否存在锁等待导致的查询阻塞",
+                "考虑优化查询逻辑或添加缺失索引",
+                "评估是否需要 SQL 限流或降级策略",
+            ],
         ),
         InspectionCase(
             case_id="rds_error_log_high",
@@ -57,13 +66,15 @@ def build_cases(time_range: str = "") -> list:
             entity_label="instance_id",
             name_label="instance_id",
             log_source="错误日志",
+            investigation_hints=[
+                "查看 ERROR 日志详情，定位错误类型（连接超时、权限、语法等）",
+                "检查是否存在批量错误（如连接池耗尽、磁盘满等）",
+                "检查应用端是否存在异常调用模式",
+                "修复应用或配置问题",
+                "评估是否需要告警联动",
+            ],
         ),
     ]
-
-
-def extract_key(labels: dict) -> str:
-    """从 labels 中提取 entity_id"""
-    return labels.get("instance_id", "unknown")
 
 
 if __name__ == "__main__":
