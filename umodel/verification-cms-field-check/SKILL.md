@@ -1,5 +1,5 @@
 ---
-name: verification-cms-field-check
+name: verification-cms-field-check-sample
 description: Inspect key devops entity fields in the CMS workspace after visibility has already been confirmed.
 ---
 
@@ -28,43 +28,53 @@ python3 devops_data_generator/scripts/verify_devops_details.py --config devops_d
 **Step 3**: Assert field values based on active provider:
 
 ### When `git_provider.type = gitlab`
-- `devops.code_repository.git_provider` must equal `"gitlab"`
-- `devops.code_repository.repo_name` format: `path_with_namespace` (e.g. `root/demo-app`)
-- `devops.code_repository.default_branch` fallback: `"main"`
-- `devops.code_release.release_type` from `release_classifier` (not hardcoded `"release"`)
+- `devops.repository.data_source` must equal `"gitlab"`
+- `devops.repository.name` format: `path_with_namespace` (e.g. `root/demo-app`)
+- `devops.repository.default_branch` fallback: `"main"`
+- `devops.release.release_type` from `release_classifier` (not hardcoded `"release"`)
 
 ### When `git_provider.type = codeup`
-- `devops.code_repository.git_provider` must equal `"aliyun"`
-- `devops.code_repository.repo_name` format: codeup repo name (e.g. `Codeup-Demo`)
-- `devops.code_repository.repo_url` must contain `codeup.aliyun.com`
-- `devops.code_repository.default_branch` fallback: `"master"`
-- `devops.code_release.release_type` from `release_classifier` (not hardcoded)
-- `devops.developer.repositories[*].access_level` = `0` (codeup does not expose access_level)
+- `devops.repository.data_source` must equal `"codeup"` (not `aliyun`)
+- `devops.repository.name` format: codeup repo name (e.g. `Codeup-Demo`)
+- `devops.repository.url` must contain `codeup.aliyun.com`
+- `devops.repository.default_branch` fallback: `"master"`
+- `devops.release.release_type` from `release_classifier` (not hardcoded)
+- `devops.user.repositories[*].access_level` = `0` (codeup does not expose access_level)
 
 ### Shared assertions (both providers)
-- `devops.code_repository.repo_id` is a non-empty string
-- `devops.code_release.release_id` format: `{repo_id_or_name}/{tag}`
-- `devops.code_release.tag` is non-empty
-- `devops.code_release.commit_sha` is non-empty
-- `devops.image.image_id` is non-empty
-- `devops.image.registry_id` is non-empty
-- `devops.image_registry.registry_id` is non-empty
-- `devops.image_registry.registry_url` is non-empty
+- `devops.repository.repository_id` is a non-empty string
+- `devops.release.release_id` format: `{repo_id_or_name}/{tag}`
+- `devops.release.tag_name` is non-empty
+- `devops.release.commit_sha` is non-empty
+- `devops.docker_image.docker_image_id` is non-empty
+- `devops.docker_image.registry` is non-empty
+- `devops.user.user_id` is non-empty
+- `devops.artifact.artifact_id` pairs with `devops.docker_image.artifact_id` (decision B)
+
+### Image alignment (cross-domain edge correctness)
+- The canonical command finishes with `pod -> docker_image topology evidence`, queried from the configured SLS relationship logstore. Use those rows as the evidence source for `container_image`, `repository`, `tag`, endpoint IDs, relation/link type, and edge keep-alive fields; do not infer an edge only from entity records.
+- Registry host must be normalized across sources. The same ACR instance may be reached via multiple endpoints (for example a VPC endpoint and a canonical endpoint). Pod `containers.image` and `devops.docker_image.full_image_name` must be compared after registry alias normalization, not by raw host string.
+- Match requires namespace + repo + tag (or digest) all equal. Matching only on the bare repo name (for example `demo`) ignores namespace and tag and produces wrong cross-domain edges. No match -> no edge; do not force a fallback link.
+- Test/branch tag images may have no corresponding `devops.release` record; this is a real release gap, not a field defect. Report the gap instead of forcing a link to a versioned release.
 
 ## Receipt Format
 ```
 - stage: cms-field-check
 - git_provider: gitlab | codeup
 - command: <canonical command>
-- checked_entity_types: [code_repository, code_release, image, image_registry, developer]
+- checked_entity_types: [repository, release, docker_image, user, artifact]
 - key_field_results:
-    code_repository:
-      git_provider: <actual value> (expected: gitlab|aliyun) — PASS|FAIL
-      repo_id: PASS|FAIL
-      repo_url: PASS|FAIL
-    code_release:
+    repository:
+      data_source: <actual value> (expected: gitlab|codeup) — PASS|FAIL
+      repository_id: PASS|FAIL
+      url: PASS|FAIL
+    release:
       release_type: <actual value> — PASS|FAIL
       ...
+    docker_image:
+      full_image_name: PASS|FAIL
+      registry_alias_normalized: <evidence from task configuration> — PASS|FAIL
+      image_alignment (namespace+repo+tag vs pod containers.image): <topology rows> — PASS|FAIL
 - verdict: PASS | FAIL
 ```
 

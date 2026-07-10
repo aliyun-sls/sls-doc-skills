@@ -1,5 +1,5 @@
 ---
-name: verification-workspace-alignment
+name: verification-workspace-alignment-sample
 description: Verify that the repository config points at the correct CMS workspace backing SLS project and workspace entity/topo logstores before refreshing data.
 ---
 
@@ -30,11 +30,11 @@ description: Verify that the repository config points at the correct CMS workspa
 **Step 3**: Provider-specific notes in the receipt:
 
 ### When `git_provider.type = gitlab`
-- Note: git data will be written with `git_provider=gitlab` in SLS entities
+- Note: git data will be written with `data_source=gitlab` in SLS entities
 - Note: `gitlab.url` endpoint is independent of SLS/CMS region
 
 ### When `git_provider.type = codeup`
-- Note: git data will be written with `git_provider=aliyun` in SLS entities
+- Note: git data will be written with `data_source=codeup` in SLS entities
 - Note: codeup endpoint (default `devops.cn-hangzhou.aliyuncs.com`) may differ from SLS/CMS region — this is expected and not a misalignment
 - If `auth_mode=pat`, note that PAT scope may return more repos than RAM AK scope
 
