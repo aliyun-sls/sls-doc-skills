@@ -1,0 +1,121 @@
+version: 1
+goal: "Verify devops data ingestion into the CMS workspace backed by SLS — run a staged pipeline that stops early on missing resources and escalates to diagnosis only when refresh or visibility fail."
+
+positioning:
+  why: "The devops producer writes entities + relationships to SLS logstores that back a CMS EntityStore; verification confirms resources exist, config is aligned, refresh ran, data is visible and alive in the graph, fields and cross-domain edges are correct, and any gap is root-caused."
+  data_planes:
+    sls: "SLS logstores hold raw entity/relationship records under sls.logstore_mapping (entities -> {workspace}__entity, relationships -> {workspace}__topo)."
+    cms: "CMS EntityStore resolves entities + edges within the keep-alive live window (__last_observed_time__ + __keep_alive_seconds__)."
+
+stages:
+  - id: resource-readiness
+    purpose: "Confirm external resources + config exist before any refresh or query."
+    depends_on: []
+    canonical_command: null
+    do:
+      - "Read git_provider.type from devops_data_generator/config/app_config.yaml."
+      - "Check provider credentials (gitlab url+token, or codeup organization_id+AK/SK; pat adds access_token) are set and not placeholders."
+      - "Check acr.instance_id, cms.workspace, cms.endpoint, sls.project, sls.endpoint are set and not placeholders."
+      - "Confirm required config files exist: app_config.yaml, data_mapping.yaml, repo_image_mapping.yaml, static_topo.yaml."
+    do_not:
+      - "Run refresh."
+      - "Run CMS query scripts as a substitute for missing resources."
+      - "Create missing resources in the first-wave flow."
+    receipt: [stage, git_provider, auth_mode, checked_resources, missing_resources, verdict]
+    references: [prerequisites.md, receipt-contract.md, workflow-stages.md]
+
+  - id: workspace-alignment
+    purpose: "Confirm config points at the correct CMS workspace and SLS entity/topo logstores before refresh."
+    depends_on: [resource-readiness]
+    canonical_command: null
+    do:
+      - "cms.workspace is set; sls.project matches or contains the workspace name."
+      - "All entity logstore mappings (sls.logstore_mapping.entities.*) point to {workspace}__entity."
+      - "All topo logstore mappings (sls.logstore_mapping.relationships.*) point to {workspace}__topo."
+      - "kubernetes_pod has an entity logstore mapping (missing => pod SLS write fails)."
+      - "If kubernetes.data_source is cms, confirm it reads from the same cms.workspace."
+    do_not:
+      - "Run refresh before alignment is understood."
+      - "Assume any SLS project is acceptable just because write permissions exist."
+    receipt: [stage, git_provider, workspace, configured_sls_project, entity_logstore_target, topo_logstore_target, kubernetes_pod_logstore, alignment, provider_notes, verdict]
+    references: [workflow-stages.md, config-contract.md, receipt-contract.md, failure-diagnosis.md]
+
+  - id: workspace-refresh
+    purpose: "Run the canonical refresh that writes entity + relationship data toward the CMS workspace."
+    depends_on: [workspace-alignment]
+    canonical_command: "python3 devops_data_generator/main.py --mode single --config devops_data_generator/config"
+    do:
+      - "Use the canonical command from script-map.md."
+      - "Record the execution summary honestly; distinguish success / partial_success / error / blocked."
+    do_not:
+      - "Replace with any historical manual wrapper path."
+      - "Claim refresh happened if only verification scripts were run."
+    receipt: [stage, execution_summary_status, counts, verdict]
+    references: [workflow-stages.md, script-map.md, config-contract.md, receipt-contract.md]
+
+  - id: cms-visibility
+    purpose: "Query CMS to confirm devops.* entities are visible and alive after refresh."
+    depends_on: [workspace-refresh]
+    canonical_command: "python3 devops_data_generator/scripts/query_cms_devops.py --config devops_data_generator/config"
+    do:
+      - "Report visible entity types and counts."
+      - "Check keep-alive columns: __method__, __last_observed_time__, __keep_alive_seconds__, __first_observed_time__."
+      - "When checking relationships via entity neighbor, always pass --relation-type (uses/same_as/contains/tags/owns)."
+    do_not:
+      - "Run first when refresh has not been attempted."
+      - "Diagnose before confirming the visibility result."
+      - "Declare entities visible solely because they were written to the logstore (stale or non-keep-alive records are not alive in the graph)."
+    receipt: [stage, visible_entity_types, counts, keep_alive_status, verdict]
+    references: [workflow-stages.md, script-map.md, receipt-contract.md]
+
+  - id: cms-field-check
+    purpose: "Inspect key entity fields and pod->docker_image topology evidence once visibility is confirmed."
+    depends_on: [cms-visibility]
+    canonical_command: "python3 devops_data_generator/scripts/verify_devops_details.py --config devops_data_generator/config"
+    do:
+      - "Derive git_provider.type from app_config.yaml; never hardcode it."
+      - "Assert provider-aware fields: data_source is gitlab|codeup (not aliyun); repository/release/docker_image/user/artifact key fields."
+      - "Use the pod->docker_image topology evidence rows for edge correctness; normalize registry aliases; match namespace+repo+tag (or digest)."
+    do_not:
+      - "Use as the first proof that refresh worked."
+      - "Conflate field problems with resource-readiness problems."
+      - "Force a fallback link when an image match fails; report the release gap instead."
+    receipt: [stage, git_provider, checked_entity_types, key_field_results, image_alignment, verdict]
+    references: [workflow-stages.md, script-map.md, receipt-contract.md]
+
+  - id: cms-sls-diagnose
+    purpose: "Diagnose CMS/SLS alignment issues when refresh or visibility results do not match expectations."
+    depends_on: [workspace-refresh, cms-visibility]
+    canonical_command: "python3 devops_data_generator/scripts/diagnose_cms_entity_store.py --config devops_data_generator/config"
+    do:
+      - "Use only after resource-readiness + refresh/visibility justify it."
+      - "Check the four root-cause classes: endpoint-id encoding mismatch; missing keep-alive fields; cross-source pod id divergence; loose image matching."
+      - "Use the field-check topology evidence before making a pod/image semantic claim."
+    do_not:
+      - "Use as the default first action."
+      - "Let diagnosis hide that a prior stage was never executed."
+      - "Declare a relationship missing while only a no-filter entity neighbor was tried; always retry with --relation-type."
+    receipt: [stage, workspace_metadata, entity_store_surface, suspected_root_cause, verdict]
+    references: [failure-diagnosis.md, script-map.md, receipt-contract.md, config-contract.md]
+
+routing:
+  default: "Sequential stages 1 -> 6; stop at the first BLOCKED/FAIL stage."
+  diagnose: "Stage 6 only when refresh (3) and visibility (4) produced uncertainty or mismatch; never the default first action."
+  provider_awareness: "Read git_provider.type from devops_data_generator/config/app_config.yaml to pick provider-specific assertions; never hardcode it."
+
+quality_gates:
+  - "Every entity and edge record carries __method__, __last_observed_time__, __keep_alive_seconds__, __first_observed_time__; otherwise written to the logstore but not alive in the graph (entity neighbor returns 0)."
+  - "Edge endpoints (__src_entity_id__ / __dest_entity_id__) use the same md5 form as the node __entity_id__; raw primary-key strings dangle."
+  - "entity neighbor always passes --relation-type (uses/same_as/contains/tags/owns); the default returns 0 and is misread as a missing relationship."
+  - "Pod containers.image vs docker_image.full_image_name compared after registry alias normalization, not by raw host string."
+  - "Image match requires namespace + repo + tag (or digest) all equal; no match -> no edge; no forced fallback link."
+  - "k8s.pod keeps the CMS original entity_id; do not recompute it."
+
+anti_patterns:
+  - "Running refresh before resource-readiness and workspace-alignment."
+  - "Diagnosing before confirming the visibility result."
+  - "Declaring a relationship missing from a no-filter entity neighbor."
+  - "Hardcoding git_provider instead of deriving it from app_config.yaml."
+  - "Forcing a fallback link when an image match fails."
+  - "Claiming refresh happened when only verification scripts ran."
+  - "Treating mock or obvious fault injection as the core diagnostic value."
