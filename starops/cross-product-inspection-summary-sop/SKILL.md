@@ -3,9 +3,9 @@ name: cross-product-inspection-summary-sop
 description: Guide users and Agents through building product inspection Missions and a cross-product summary Mission that consumes their reports into a unified report.
 ---
 
-# 跨产品巡检汇总报告 SOP
+# 多云产品融合巡检报告 SOP
 
-本 Skill 指导用户或 Agent 从零构建一套跨产品巡检汇总机制：先建立单产品巡检 Mission，再建立汇总 Mission 消费它们的报告。首期以 ECS 主机、Kubernetes 集群和 RDS 数据库为例。
+本 Skill 指导用户或 Agent 从零构建一套多云产品融合巡检机制：先建立单产品巡检 Mission，再建立汇总 Mission 消费它们的报告。首期以 ECS 主机、Kubernetes 集群和 RDS 数据库为例。
 
 ## 使用场景
 
