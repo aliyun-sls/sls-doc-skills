@@ -1,0 +1,4 @@
+interface:
+  display_name: "DevOps Verification"
+  short_description: "Verify devops data ingestion into CMS/SLS"
+  default_prompt: "Verify devops data is correctly ingested into the CMS workspace: run the staged verification pipeline (readiness, alignment, refresh, visibility, field-check, diagnose) and route to the stage the situation needs."
